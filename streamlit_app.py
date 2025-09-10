@@ -8,10 +8,12 @@ from snowflake.snowpark.exceptions import SnowparkSQLException
 from src.notification import *
 from src.search import *
 from src.cortex_agent import *
+from src.settings import display_settings
 # from trulens.connectors.snowflake import SnowflakeConnector
 # from trulens.core.session import TruSession
 # from trulens.dashboard import run_dashboard
-
+# for key in st.session_state.keys():
+#     del st.session_state[key]
 # Load the config file
 config_path = Path("src/settings_config.json")
 with open(config_path, "r") as f:
@@ -26,6 +28,16 @@ if 'page' not in st.session_state:
 
 if 'snowflake_session' not in st.session_state:
     st.session_state.snowflake_session = None
+
+if "legacy_function" not in st.session_state:
+    st.session_state["legacy_function"] = False
+
+if "show_private_preview_models" not in st.session_state:
+    st.session_state["show_private_preview_models"] = False
+
+if "setup_completed" not in st.session_state:
+    st.session_state["setup_completed"] = False
+
 
 # Establish the session if not already initialized
 if st.session_state.snowflake_session is None:
@@ -51,20 +63,33 @@ if st.session_state.snowflake_session is None:
         except Exception as e:
             st.error(f"Failed to create session in debug mode: {e}")
 
-# Check if session is successfully created
-if st.session_state.snowflake_session is None:
-    st.error("Failed to connect to Snowflake.")
-else:
-    try:
-        create_database_and_stage_if_not_exists(st.session_state.snowflake_session)
-    except Exception as e:
-        st.error(f"Error while creating database and stage: {e}")
-
-
 
 # Set up UDF at app start
 setup_pdf_text_chunker(st.session_state.snowflake_session)
 
+# Check if session is successfully created
+if st.session_state.snowflake_session is None:
+    st.error("Failed to connect to Snowflake.")
+else:
+    # Only run setup functions once on first load
+    if not st.session_state.setup_completed:
+        try:
+            with st.spinner("Setting up the environment... This may take a few moments."):
+                create_database_and_stage_if_not_exists(st.session_state.snowflake_session)
+                create_demo_database_and_stage_if_not_exists(st.session_state.snowflake_session)
+                create_stages_tables_for_demo(st.session_state.snowflake_session)
+                setup_pdf_text_chunker_demo(st.session_state.snowflake_session, config["demo_database"], config["demo_schema"])
+                create_search_and_rag_for_demo(st.session_state.snowflake_session)
+                create_starter_sql(st.session_state.snowflake_session)
+            
+            # Mark setup as completed
+            st.session_state.setup_completed = True
+            # st.success("✅ Demo environment setup completed!")
+            
+        except Exception as e:
+            st.error(f"Error while setting up demo environment: {e}")
+            # Don't mark as completed if there was an error
+            st.session_state.setup_completed = False
 
 # Load custom CSS for sidebar styling
 st.markdown("""
@@ -113,8 +138,10 @@ with st.sidebar:
     with st.expander("🔍 **Overview**", expanded=False):
         if st.button("📄 About"):
             st.session_state.page = "Home"
-        if st.button("⚙️ Setup"):
-            st.session_state.page = "Setup"
+        # if st.button("⚙️ Setup"):
+        #     st.session_state.page = "Setup"
+        if st.button("⚙️ Settings"):
+            st.session_state.page = "Settings"
 
     # Components Section
     with st.expander("✨ **Components**", expanded=False):
@@ -137,7 +164,8 @@ pages = {
     "Notification": notification.display_notification,
     "Cortex Search": display_search,
     "Cortex Agent": display_cortex_agent,
-    "Setup": setup.display_setup
+    # "Setup": setup.display_setup,
+    "Settings": display_settings
 }
 
 # Render the selected page from the pages dictionary

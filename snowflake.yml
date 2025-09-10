@@ -3,7 +3,7 @@ definition_version: '2'
 entities:
   streamlit:
     type: streamlit
-    identifier: snowflake_ai_toolkit_demo
+    identifier: snowflake_ai_toolkit
     stage: sf_ai_stage
     query_warehouse: compute_wh
     main_file: streamlit_app.py
@@ -32,7 +32,11 @@ entities:
       - src/logo.png
       - src/query_result_builder.py
       - src/search.py
+      - src/settings.py
+      - src/defaults.py
       - environment.yml
+      - data/
+      - scripts/
 
   # audio_to_text:
   #   handler: 'src.functions.audio_to_text'

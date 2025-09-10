@@ -6,6 +6,7 @@ import json
 import time
 import base64
 import snowflake.connector
+import requests
 from src.cortex_functions import *
 from typing import List, Dict, Union, Optional
 # from streamlit_mic_recorder import speech_to_text
@@ -14,6 +15,244 @@ from typing import List, Dict, Union, Optional
 config_path = Path("src/settings_config.json")
 with open(config_path, "r") as f:
     config = json.load(f)
+
+def determine_environment_and_file_source(session):
+    """
+    Determines whether we're running locally or in deployed Snowflake environment
+    and returns appropriate file source configuration.
+    
+    Returns:
+        tuple: (environment_type, source_path)
+        - environment_type: "deployed", "local", or "unknown"
+        - source_path: path to use for file operations
+    """
+    print("🔍 Detecting environment and file source...")
+    
+    # Method 1: Check if deployment stage exists and has files
+    try:
+        deployment_stage = "@SNOWFLAKE_AI_TOOLKIT.PUBLIC.sf_ai_stage/snowflake_ai_toolkit"
+        files = session.sql(f"LIST {deployment_stage}/data/").collect()
+        if len(files) > 0:
+            print(f"✓ Detected deployed environment - using stage: {deployment_stage}")
+            return "deployed", deployment_stage
+    except Exception as e:
+        print(f"🔍 Deployment stage check failed: {e}")
+    
+    # Method 2: Check if local data folder exists in current directory
+    import os
+    if os.path.exists("data") and os.path.isdir("data"):
+        print("✓ Detected local environment - using current directory data folder")
+        return "local", "data"
+    
+    # Method 3: Try to find data folder relative to script location
+    try:
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local_data_path = os.path.join(script_dir, "data")
+        if os.path.exists(local_data_path):
+            print(f"✓ Detected local environment - using script-relative data folder: {local_data_path}")
+            return "local", local_data_path
+    except Exception as e:
+        print(f"🔍 Script-relative path check failed: {e}")
+    
+    # Method 4: Debug current environment
+    try:
+        print(f"🔍 Current working directory: {os.getcwd()}")
+        print(f"🔍 Available directories: {[d for d in os.listdir('.') if os.path.isdir(d)]}")
+    except Exception as e:
+        print(f"🔍 Directory listing failed: {e}")
+    
+    print("⚠️ Could not determine environment - no suitable file source found")
+    return "unknown", None
+
+def upload_files_from_local(session, source_base_path, file_mappings):
+    """
+    Uploads files from local filesystem using PUT commands.
+    
+    Args:
+        session: Snowflake session object
+        source_base_path: Base path for local files
+        file_mappings: List of file mapping configurations
+    
+    Returns:
+        tuple: (files_uploaded, files_skipped)
+    """
+    import os
+    files_uploaded = 0
+    files_skipped = 0
+    
+    for mapping in file_mappings:
+        if "source_folder" in mapping:
+            # Handle folder-based mappings (for images, contracts, etc.)
+            if source_base_path == "data":
+                source_folder = mapping["source_folder"]
+            else:
+                # Extract relative path from mapping and combine with base path
+                relative_path = mapping["source_folder"].replace("data/", "").replace("data\\", "")
+                source_folder = os.path.join(source_base_path, relative_path)
+            
+            stage_path = mapping["stage_path"]
+            file_extensions = mapping["file_extensions"]
+            description = mapping["description"]
+            stage_name = mapping["stage_name"]
+            
+            print(f"🔍 Processing {description} from {source_folder}")
+            
+            if os.path.exists(source_folder):
+                # Get existing files in stage
+                existing_filenames = get_existing_stage_files(session, stage_path)
+                
+                # Process all files in the source folder
+                for filename in os.listdir(source_folder):
+                    file_path = os.path.join(source_folder, filename)
+                    
+                    if os.path.isfile(file_path):
+                        file_ext = os.path.splitext(filename)[1].lower()
+                        
+                        if file_ext in file_extensions:
+                            if filename not in existing_filenames:
+                                try:
+                                    # Upload file using PUT command
+                                    normalized_path = file_path.replace("\\", "/")
+                                    put_query = f"PUT 'file://{normalized_path}' {stage_path} AUTO_COMPRESS=FALSE"
+                                    session.sql(put_query).collect()
+                                    
+                                    files_uploaded += 1
+                                    print(f"✓ Uploaded {filename} to {stage_name} stage ({description})")
+                                    
+                                except Exception as e:
+                                    print(f"✗ Failed to upload {filename} to {stage_name}: {e}")
+                                    continue
+                            else:
+                                files_skipped += 1
+                                print(f"⏭ File {filename} already exists in {stage_name}, skipping")
+            else:
+                print(f"❌ Source folder {source_folder} does not exist")
+                
+        elif "source_file" in mapping:
+            # Handle individual file mappings (for CSV files, etc.)
+            if source_base_path == "data":
+                source_file = mapping["source_file"]
+            else:
+                # Extract relative path and combine with base path
+                relative_path = mapping["source_file"].replace("data/", "").replace("data\\", "")
+                source_file = os.path.join(source_base_path, relative_path)
+            
+            description = mapping["description"]
+            filename = os.path.basename(source_file)
+            
+            if os.path.exists(source_file):
+                print(f"✓ Found local file: {source_file}")
+                files_uploaded += 1
+            else:
+                print(f"❌ Local file not found: {source_file}")
+    
+    return files_uploaded, files_skipped
+
+def copy_files_from_stage(session, deployment_stage, file_mappings):
+    """
+    Copies files from deployment stage using COPY FILES commands.
+    
+    Args:
+        session: Snowflake session object
+        deployment_stage: Path to deployment stage
+        file_mappings: List of file mapping configurations
+    
+    Returns:
+        tuple: (files_copied, files_skipped)
+    """
+    import os
+    files_copied = 0
+    files_skipped = 0
+    
+    for mapping in file_mappings:
+        if "source_folder" in mapping:
+            # Handle folder-based mappings (for images, contracts, etc.)
+            relative_path = mapping["source_folder"].replace("data/", "").replace("data\\", "")
+            source_path = f"{deployment_stage}/data/{relative_path}/"
+            
+            stage_path = mapping["stage_path"]
+            file_extensions = mapping["file_extensions"]
+            description = mapping["description"]
+            stage_name = mapping["stage_name"]
+            
+            print(f"🔍 Processing {description} from {source_path}")
+            
+            # Get existing files in target stage
+            existing_filenames = get_existing_stage_files(session, stage_path)
+            
+            # Get files from source deployment stage
+            try:
+                source_files = session.sql(f"LIST {source_path}").collect()
+                print(f"Found {len(source_files)} files in deployment stage at {source_path}")
+                
+                for file_info in source_files:
+                    file_name = file_info["name"]
+                    filename_only = file_name.split("/")[-1].split("\\")[-1]
+                    file_ext = os.path.splitext(filename_only)[1].lower()
+                    
+                    if file_ext in file_extensions:
+                        if filename_only not in existing_filenames:
+                            try:
+                                # Copy file from deployment stage to target stage
+                                copy_query = f"""
+                                COPY FILES INTO {stage_path}
+                                FROM {source_path}{filename_only}
+                                """
+                                session.sql(copy_query).collect()
+                                
+                                files_copied += 1
+                                print(f"✓ Copied {filename_only} to {stage_name} stage ({description})")
+                                
+                            except Exception as e:
+                                print(f"✗ Failed to copy {filename_only} to {stage_name}: {e}")
+                                continue
+                        else:
+                            files_skipped += 1
+                            print(f"⏭ File {filename_only} already exists in {stage_name}, skipping")
+                            
+            except Exception as e:
+                print(f"❌ Could not list files from deployment stage {source_path}: {e}")
+                
+        elif "source_file" in mapping:
+            # Handle individual file mappings (for CSV files, etc.)
+            relative_path = mapping["source_file"].replace(f"{deployment_stage}/", "")
+            source_file = f"{deployment_stage}/{relative_path}"
+            description = mapping["description"]
+            filename = source_file.split("/")[-1]
+            
+            print(f"🔍 Processing {description}: {filename}")
+            files_copied += 1  # Assume success for individual files
+    
+    return files_copied, files_skipped
+
+def get_existing_stage_files(session, stage_path):
+    """
+    Gets list of existing files in a stage.
+    
+    Args:
+        session: Snowflake session object
+        stage_path: Stage path to list
+    
+    Returns:
+        list: List of filenames in the stage
+    """
+    try:
+        existing_files = session.sql(f"LIST {stage_path}").collect()
+        existing_filenames = []
+        for file in existing_files:
+            file_name = file["name"]
+            # Handle both forward and backslash separators, get just the filename
+            if "/" in file_name:
+                filename_only = file_name.split("/")[-1]
+            elif "\\" in file_name:
+                filename_only = file_name.split("\\")[-1]
+            else:
+                filename_only = file_name
+            existing_filenames.append(filename_only)
+        return existing_filenames
+    except Exception as e:
+        print(f"Could not list files in stage {stage_path} (might be empty): {e}")
+        return []
 
 def render_image(filepath: str):
     """
@@ -560,6 +799,232 @@ def create_database_and_stage_if_not_exists(session: Session):
         pass
         #print(f"Stage '{stage_name}' already exists in '{database_name}'. Skipping creation.")
 
+def create_demo_database_and_stage_if_not_exists(session: Session):
+    """
+    Creates the demo database, schema, stage and sample tables if they do not already exist.
+    Sample tables are populated from Snowflake's sample dataset.
+    
+    Args:
+        session (Session): Snowflake session object
+    """
+    try:
+        # Use demo configurations from config
+        database_name = config["demo_database"]  # "demo"
+        demo_schema = config["demo_schema"]  # "DEMO_SCHEMA"
+        
+        # Stage names from config
+        #demo_stage = config["demo_stage"]  # "demo_stage" 
+        my_images_stage = config["my_images"]  # "MY_IMAGES"
+        contracts_stage = config["contracts"]  # "CONTRACTS"
+        repair_manual_stage = config["repair_manual"]  # "REPAIR_MANUAL"
+        
+        # Sample table names from config
+        store_view = config["store_view"]  # "SAMPLE_STORE"
+        store_returns_view = config["store_returns_view"]  # "SAMPLE_STORE_RETURNS"
+        store_sales_view = config["store_sales_view"]  # "SAMPLE_STORE_SALES"
+        reason_view = config["reason_view"]  # "SAMPLE_REASON"
+        
+        # Source dataset information
+        source_db = "SNOWFLAKE_SAMPLE_DATA"
+        source_schema = "TPCDS_SF10TCL"
+        
+        # Quick check: if demo database, schema, and key stages already exist, skip most setup
+        try:
+            database_check = session.sql(f"SHOW DATABASES LIKE '{database_name}'").collect()
+            if database_check:
+                schema_check = session.sql(f"SHOW SCHEMAS LIKE '{demo_schema}' IN {database_name}").collect()
+                if schema_check:
+                    # Check if at least one key table exists
+                    table_check = session.sql(f"SHOW TABLES LIKE '{store_view}' IN {database_name}.{demo_schema}").collect()
+                    # Check if at least one key stage exists  
+                    stage_check = session.sql(f"SHOW STAGES LIKE '{my_images_stage}' IN {database_name}.{demo_schema}").collect()
+                    
+                    if table_check and stage_check:
+                        print(f"✓ Demo environment already exists in {database_name}.{demo_schema}")
+                        print("⏭ Skipping database and table creation, but checking for new files to upload...")
+                        
+                        # Still check for new files to upload
+                        file_upload_only = True
+                    else:
+                        file_upload_only = False
+                else:
+                    file_upload_only = False
+            else:
+                file_upload_only = False
+        except:
+            file_upload_only = False
+        
+        if not file_upload_only:
+            print("🚀 Setting up demo environment...")
+            
+            # 1. Create demo database if it doesn't exist
+            database_query = f"SHOW DATABASES LIKE '{database_name}'"
+            existing_databases = session.sql(database_query).collect()
+            
+            if not existing_databases:
+                session.sql(f"CREATE DATABASE IF NOT EXISTS {database_name}").collect()
+                print(f"Created database '{database_name}'")
+            
+            # 2. Create demo schema in demo database if it doesn't exist
+            schema_query = f"SHOW SCHEMAS LIKE '{demo_schema}' IN {database_name}"
+            existing_schemas = session.sql(schema_query).collect()
+            
+            if not existing_schemas:
+                session.sql(f"CREATE SCHEMA IF NOT EXISTS {database_name}.{demo_schema}").collect()
+                print(f"Created schema '{demo_schema}' in {database_name}")
+            
+            # 3. Create demo stages in demo database if they don't exist
+            stages_to_create = [
+                {"name": my_images_stage, "description": "Demo images stage"},
+                {"name": contracts_stage, "description": "Contracts PDF stage"}, 
+                {"name": repair_manual_stage, "description": "Repair manuals PDF stage"}
+            ]
+            for stage_info in stages_to_create:
+                current_stage_name = stage_info["name"]
+                description = stage_info["description"]
+                
+                create_stage_query = f"""
+                    CREATE OR REPLACE STAGE {database_name}.{demo_schema}.{current_stage_name}
+                    ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')
+                    DIRECTORY = (ENABLE = TRUE)
+                    COMMENT = 'Internal stage with server-side encryption and directory table enabled.';
+                    """
+                session.sql(create_stage_query).collect()
+                print(f"Created stage '{current_stage_name}' with server-side encryption ({description}) in {database_name}.{demo_schema}")
+            
+            # 4. Create sample tables if they don't exist
+            sample_tables = [
+                {
+                    "target_table": store_view,
+                    "source_table": "STORE",
+                    "limit": 1000,
+                    "description": "Store information"
+                },
+                {
+                    "target_table": store_returns_view,
+                    "source_table": "STORE_RETURNS", 
+                    "limit": 1000,
+                    "description": "Store returns data"
+                },
+                {
+                    "target_table": store_sales_view,
+                    "source_table": "STORE_SALES",
+                    "limit": 1000, 
+                    "description": "Store sales data"
+                },
+                {
+                    "target_table": reason_view,
+                    "source_table": "REASON",
+                    "limit": None,  # Copy all records
+                    "description": "Reason codes"
+                }
+            ]
+            
+            for table_info in sample_tables:
+                target_table = table_info["target_table"]
+                source_table = table_info["source_table"]
+                limit = table_info["limit"]
+                description = table_info["description"]
+                
+                # Check if table exists in demo database
+                table_query = f"SHOW TABLES LIKE '{target_table}' IN {database_name}.{demo_schema}"
+                existing_tables = session.sql(table_query).collect()
+                
+                if not existing_tables:
+                    # Create table with data from sample dataset in demo database
+                    if limit:
+                        create_query = f"""
+                        CREATE TABLE {database_name}.{demo_schema}.{target_table} AS
+                        SELECT * FROM {source_db}.{source_schema}.{source_table}
+                        LIMIT {limit}
+                        """
+                    else:
+                        create_query = f"""
+                        CREATE TABLE {database_name}.{demo_schema}.{target_table} AS
+                        SELECT * FROM {source_db}.{source_schema}.{source_table}
+                        """
+                    
+                    session.sql(create_query).collect()
+                    
+                    # Get record count for confirmation
+                    count_query = f"SELECT COUNT(*) as count FROM {database_name}.{demo_schema}.{target_table}"
+                    record_count = session.sql(count_query).collect()[0]["COUNT"]
+                    
+                    print(f"Created table '{target_table}' with {record_count:,} records ({description})")
+                else:
+                    print(f"Table '{target_table}' already exists, skipping creation")
+            
+            print("Demo database and sample tables setup completed successfully!")
+        
+        # 5. Handle file operations based on environment
+        try:
+            # Detect environment and determine file source
+            environment, source_path = determine_environment_and_file_source(session)
+            
+            if environment == "unknown":
+                print("⚠️ Could not determine environment - skipping file operations")
+                if file_upload_only:
+                    print("✅ File operation check completed (no files processed)!")
+                else:
+                    print("✅ Demo database, sample tables setup completed (no files processed)!")
+                return
+            
+            # Define file mappings for both environments
+            file_mappings = [
+                {
+                    "source_folder": "data/images",
+                    "stage_name": my_images_stage,
+                    "stage_path": f"@{database_name}.{demo_schema}.{my_images_stage}",
+                    "file_extensions": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"],
+                    "description": "Images from data folder"
+                },
+                {
+                    "source_folder": "data/rag/contracts",
+                    "stage_name": contracts_stage,
+                    "stage_path": f"@{database_name}.{demo_schema}.{contracts_stage}",
+                    "file_extensions": [".pdf", ".doc", ".docx", ".txt"],
+                    "description": "Contract documents"
+                },
+                {
+                    "source_folder": "data/rag/repair_manuals",
+                    "stage_name": repair_manual_stage,
+                    "stage_path": f"@{database_name}.{demo_schema}.{repair_manual_stage}",
+                    "file_extensions": [".pdf", ".doc", ".docx", ".txt"],
+                    "description": "Repair manual documents"
+                }
+            ]
+            
+            # Process files based on environment
+            if environment == "deployed":
+                files_processed, files_skipped = copy_files_from_stage(session, source_path, file_mappings)
+                operation_type = "copied"
+            elif environment == "local":
+                files_processed, files_skipped = upload_files_from_local(session, source_path, file_mappings)
+                operation_type = "uploaded"
+            
+            # Summary
+            if files_processed > 0:
+                print(f"📤 Successfully {operation_type} {files_processed} new files to demo stages")
+            if files_skipped > 0:
+                print(f"⏭ Skipped {files_skipped} existing files in demo stages")
+            if files_processed == 0 and files_skipped == 0:
+                print(f"📂 No files found to {operation_type.replace('ed', '')} to demo stages")
+            
+        except Exception as e:
+            print(f"Error processing files: {e}")
+            # Don't fail the entire function if file operations fail
+        
+        if file_upload_only:
+            print("✅ File upload check completed!")
+        else:
+            print("✅ Demo database, sample tables, and data files setup completed successfully!")
+        
+    except Exception as e:
+        print(f"Error setting up demo database and tables: {e}")
+        # Don't raise the exception to avoid breaking the application
+        # but log it for debugging purposes
+
+
 def create_stage(session, database, schema, stage_name):
     """
     Creates a stage in the specified database and schema.
@@ -756,6 +1221,66 @@ class pdf_text_chunker:
         #st.success("UDF pdf_text_chunker created successfully.")
     except Exception as e:
         st.error(f"Error creating UDF: {e}")
+
+
+def setup_pdf_text_chunker_demo(session, db, schema):
+    """
+    Sets up the pdf_text_chunker UDF in the current database and schema.
+    
+    Args:
+        session: Snowflake session object
+        
+    Note:
+        Creates a Python UDF that can process PDF files and split them into text chunks
+    """
+
+    # Create UDF if it doesn't exist
+    #TODO: Have to make schema dynamic
+    create_udf_query = """
+    CREATE OR REPLACE FUNCTION snowflake_ai_toolkit.demo.pdf_text_chunker(file_url STRING)
+    RETURNS TABLE (chunk VARCHAR)
+    LANGUAGE PYTHON
+    RUNTIME_VERSION = '3.9'
+    HANDLER = 'pdf_text_chunker'
+    PACKAGES = ('snowflake-snowpark-python', 'PyPDF2', 'langchain')
+    AS
+    $$
+import PyPDF2
+import io
+import pandas as pd
+from snowflake.snowpark.files import SnowflakeFile
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+class pdf_text_chunker:
+    def read_pdf(self, file_url: str) -> str:
+        with SnowflakeFile.open(file_url, 'rb') as f:
+            buffer = io.BytesIO(f.readall())
+        reader = PyPDF2.PdfReader(buffer)
+        text = ""
+        for page in reader.pages:
+            try:
+                text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
+            except:
+                text = "Unable to Extract"
+        return text
+
+    def process(self, file_url: str):
+        text = self.read_pdf(file_url)
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=4000,
+            chunk_overlap=400,
+            length_function=len
+        )
+        chunks = text_splitter.split_text(text)
+        df = pd.DataFrame(chunks, columns=['chunk'])
+        yield from df.itertuples(index=False, name=None)
+    $$
+    """
+    try:
+        session.sql(create_udf_query).collect()
+        #st.success("UDF pdf_text_chunker created successfully.")
+    except Exception as e:
+        print("UDF Already exists!")
 
 
 def make_llm_call(session,system_prompt, prompt, model):
@@ -1059,3 +1584,636 @@ def list_table_columns(session, database, schema, table):
     except Exception as e:
         st.error(f"Error listing columns: {e}")
         return []
+
+def create_stages_tables_for_demo(session):
+    """
+    Creates the SAMPLE_FILES stage and demo tables (MEDICAL_NOTES, TRAIN_SAMPLES, VALIDATE_SAMPLES) 
+    in the demo database if they do not already exist. Also uploads the corresponding CSV files.
+    
+    Args:
+        session (Session): Snowflake session object
+    """
+    try:
+        # Use demo configurations from config
+        database_name = config["demo_database"]  # "SNOWFLAKE_AI_TOOLKIT"
+        demo_schema = config["demo_schema"]  # "DEMO"
+        sample_files_stage = "SAMPLE_FILES"
+        
+        print("🚀 Setting up demo stage and tables for sample files...")
+        
+        # 1. Create SAMPLE_FILES stage if it doesn't exist
+        stage_query = f"SHOW STAGES LIKE '{sample_files_stage}' IN {database_name}.{demo_schema}"
+        existing_stages = session.sql(stage_query).collect()
+        
+        if not existing_stages:
+            create_stage_query = f"""
+                CREATE OR REPLACE STAGE {database_name}.{demo_schema}.{sample_files_stage}
+                ENCRYPTION = (TYPE = 'SNOWFLAKE_SSE')
+                DIRECTORY = (ENABLE = TRUE)
+                COMMENT = 'Internal stage for sample CSV files with server-side encryption and directory table enabled.';
+                """
+            session.sql(create_stage_query).collect()
+            print(f"Created stage '{sample_files_stage}' with server-side encryption in {database_name}.{demo_schema}")
+        else:
+            print(f"Stage '{sample_files_stage}' already exists, skipping creation")
+        
+        # 2. Handle CSV file operations based on environment
+        try:
+            # Detect environment and determine file source
+            environment, source_path = determine_environment_and_file_source(session)
+            
+            if environment == "unknown":
+                print("⚠️ Could not determine environment - skipping CSV file operations")
+            else:
+                # Define file mappings for CSV files
+                file_mappings = [
+                    {
+                        "source_file": "data/search/health_prescription_data.csv",
+                        "description": "Health prescription data for medical notes"
+                    },
+                    {
+                        "source_file": "data/fine-tune/train.csv", 
+                        "description": "Training data for fine-tuning"
+                    },
+                    {
+                        "source_file": "data/fine-tune/validate.csv",
+                        "description": "Validation data for fine-tuning"
+                    },
+                    {
+                        "source_file": "scripts/sales_metrics_model.yaml",
+                        "description": "Sales metrics model configuration"
+                    }
+                ]
+                
+                stage_path = f"@{database_name}.{demo_schema}.{sample_files_stage}"
+                
+                # Get list of existing files in stage
+                existing_filenames = get_existing_stage_files(session, stage_path)
+                print(f"Found {len(existing_filenames)} existing files in {sample_files_stage} stage: {existing_filenames}")
+                
+                files_uploaded = 0
+                files_skipped = 0
+                
+                # Process files based on environment
+                if environment == "deployed":
+                    # Copy files from deployment stage
+                    for mapping in file_mappings:
+                        filename = mapping["source_file"].split("/")[-1]
+                        description = mapping["description"]
+                        
+                        if filename not in existing_filenames:
+                            try:
+                                # Construct source path in deployment stage
+                                if mapping["source_file"].startswith("scripts/"):
+                                    source_file = f"{source_path}/{mapping['source_file']}"
+                                else:
+                                    source_file = f"{source_path}/{mapping['source_file']}"
+                                
+                                # Copy file from deployment stage to SAMPLE_FILES stage
+                                copy_query = f"""
+                                COPY FILES INTO {stage_path}
+                                FROM {source_file}
+                                """
+                                session.sql(copy_query).collect()
+                                
+                                files_uploaded += 1
+                                print(f"✓ Copied {filename} to {sample_files_stage} stage ({description})")
+                                
+                            except Exception as e:
+                                print(f"✗ Failed to copy {filename} to {sample_files_stage}: {e}")
+                                continue
+                        else:
+                            files_skipped += 1
+                            print(f"⏭ File {filename} already exists in {sample_files_stage}, skipping")
+                            
+                elif environment == "local":
+                    # Upload files from local filesystem
+                    import os
+                    for mapping in file_mappings:
+                        if source_path == "data":
+                            source_file = mapping["source_file"]
+                        else:
+                            # Handle absolute path
+                            if mapping["source_file"].startswith("scripts/"):
+                                # For scripts, go up one level from data folder
+                                script_base = os.path.dirname(source_path)
+                                source_file = os.path.join(script_base, mapping["source_file"])
+                            else:
+                                relative_path = mapping["source_file"].replace("data/", "")
+                                source_file = os.path.join(source_path, relative_path)
+                        
+                        filename = os.path.basename(source_file)
+                        description = mapping["description"]
+                        
+                        if os.path.exists(source_file):
+                            if filename not in existing_filenames:
+                                try:
+                                    # Upload file using PUT command
+                                    normalized_path = source_file.replace("\\", "/")
+                                    put_query = f"PUT 'file://{normalized_path}' {stage_path} AUTO_COMPRESS=FALSE"
+                                    session.sql(put_query).collect()
+                                    
+                                    files_uploaded += 1
+                                    print(f"✓ Uploaded {filename} to {sample_files_stage} stage ({description})")
+                                    
+                                except Exception as e:
+                                    print(f"✗ Failed to upload {filename} to {sample_files_stage}: {e}")
+                                    continue
+                            else:
+                                files_skipped += 1
+                                print(f"⏭ File {filename} already exists in {sample_files_stage}, skipping")
+                        else:
+                            print(f"⚠ Source file {source_file} does not exist, skipping")
+                
+                # Summary
+                operation_type = "copied" if environment == "deployed" else "uploaded"
+                if files_uploaded > 0:
+                    print(f"📤 Successfully {operation_type} {files_uploaded} new files to {sample_files_stage} stage")
+                if files_skipped > 0:
+                    print(f"⏭ Skipped {files_skipped} existing files in {sample_files_stage} stage")
+                    
+        except Exception as e:
+            print(f"Error processing CSV files: {e}")
+        
+        # 3. Create tables if they don't exist
+        table_definitions = [
+            {
+                "table_name": "MEDICAL_NOTES",
+                "source_file": "health_prescription_data.csv",
+                "description": "Medical notes and prescription data",
+                "create_query": f"""
+                    CREATE TABLE IF NOT EXISTS {database_name}.{demo_schema}.MEDICAL_NOTES (
+                        SUBJECT_ID INTEGER,
+                        ROW_ID INTEGER,
+                        HADM_ID INTEGER,
+                        CATEGORY VARCHAR(500),
+                        ADMISSION_TYPE VARCHAR(500),
+                        DIAGNOSIS VARCHAR(1000),
+                        TEXT VARCHAR(16777216)
+                    )
+                """,
+                "copy_query": f"""
+                    COPY INTO {database_name}.{demo_schema}.MEDICAL_NOTES
+                    FROM {stage_path}/health_prescription_data.csv
+                    FILE_FORMAT = (TYPE = 'CSV' FIELD_DELIMITER = ',' SKIP_HEADER = 1 
+                                  FIELD_OPTIONALLY_ENCLOSED_BY = '"' ESCAPE_UNENCLOSED_FIELD = NONE)
+                    ON_ERROR = 'CONTINUE'
+                """
+            },
+            {
+                "table_name": "TRAIN_SAMPLES",
+                "source_file": "train.csv",
+                "description": "Training samples for fine-tuning",
+                "create_query": f"""
+                    CREATE TABLE IF NOT EXISTS {database_name}.{demo_schema}.TRAIN_SAMPLES (
+                        COMPLETION VARCHAR(16777216),
+                        PROMPT VARCHAR(16777216)
+                    )
+                """,
+                "copy_query": f"""
+                    COPY INTO {database_name}.{demo_schema}.TRAIN_SAMPLES
+                    FROM {stage_path}/train.csv
+                    FILE_FORMAT = (TYPE = 'CSV' FIELD_DELIMITER = ',' SKIP_HEADER = 1 
+                                  FIELD_OPTIONALLY_ENCLOSED_BY = '"' ESCAPE_UNENCLOSED_FIELD = NONE)
+                    ON_ERROR = 'CONTINUE'
+                """
+            },
+            {
+                "table_name": "VALIDATE_SAMPLES",
+                "source_file": "validate.csv", 
+                "description": "Validation samples for fine-tuning",
+                "create_query": f"""
+                    CREATE TABLE IF NOT EXISTS {database_name}.{demo_schema}.VALIDATE_SAMPLES (
+                        COMPLETION VARCHAR(16777216),
+                        PROMPT VARCHAR(16777216)
+                    )
+                """,
+                "copy_query": f"""
+                    COPY INTO {database_name}.{demo_schema}.VALIDATE_SAMPLES
+                    FROM {stage_path}/validate.csv
+                    FILE_FORMAT = (TYPE = 'CSV' FIELD_DELIMITER = ',' SKIP_HEADER = 1 
+                                  FIELD_OPTIONALLY_ENCLOSED_BY = '"' ESCAPE_UNENCLOSED_FIELD = NONE)
+                    ON_ERROR = 'CONTINUE'
+                """
+            }
+        ]
+        
+        for table_def in table_definitions:
+            table_name = table_def["table_name"]
+            source_file = table_def["source_file"]
+            description = table_def["description"]
+            create_query = table_def["create_query"]
+            copy_query = table_def["copy_query"]
+            
+            # Check if table exists
+            table_query = f"SHOW TABLES LIKE '{table_name}' IN {database_name}.{demo_schema}"
+            existing_tables = session.sql(table_query).collect()
+            
+            if not existing_tables:
+                try:
+                    # Create table
+                    session.sql(create_query).collect()
+                    print(f"Created table '{table_name}' ({description})")
+                    
+                    # Load data from CSV file if it was uploaded
+                    if source_file.split('/')[-1] in [f.split('/')[-1] for f in [m["source_file"] for m in file_mappings]]:
+                        session.sql(copy_query).collect()
+                        
+                        # Get record count for confirmation
+                        count_query = f"SELECT COUNT(*) as count FROM {database_name}.{demo_schema}.{table_name}"
+                        record_count = session.sql(count_query).collect()[0]["COUNT"]
+                        
+                        print(f"Loaded {record_count:,} records into table '{table_name}' from {source_file}")
+                    else:
+                        print(f"Source file {source_file} not found for table '{table_name}'")
+                        
+                except Exception as e:
+                    print(f"✗ Failed to create or load table '{table_name}': {e}")
+                    continue
+            else:
+                # Table exists, check if it has data
+                count_query = f"SELECT COUNT(*) as count FROM {database_name}.{demo_schema}.{table_name}"
+                try:
+                    record_count = session.sql(count_query).collect()[0]["COUNT"]
+                    print(f"Table '{table_name}' already exists with {record_count:,} records, skipping creation")
+                except Exception as e:
+                    print(f"Table '{table_name}' exists but could not get record count: {e}")
+        
+        print("✅ Demo stage and tables setup completed successfully!")
+        
+    except Exception as e:
+        print(f"Error setting up demo stage and tables: {e}")
+        # Don't raise the exception to avoid breaking the application
+        # but log it for debugging purposes
+
+def create_search_and_rag_for_demo(session):
+    """
+    Creates Cortex Search Service on MEDICAL_NOTES table and triggers RAG processes 
+    for repair manuals and contracts stages in the demo environment.
+    
+    Args:
+        session (Session): Snowflake session object
+    """
+    try:
+        from src.cortex_functions import create_vector_embedding_from_stage
+        from src.notification import add_notification_entry
+        
+        # Use demo configurations from config
+        database_name = config["demo_database"]  # "SNOWFLAKE_AI_TOOLKIT"
+        demo_schema = config["demo_schema"]  # "DEMO"
+        warehouse = config["warehouse"]  # "COMPUTE_WH"
+        contracts_stage = config["contracts"]  # "CONTRACTS"
+        repair_manual_stage = config["repair_manual"]  # "REPAIR_MANUAL"
+        
+        # Default embedding settings
+        embedding_type = "EMBED_TEXT_1024"
+        embedding_model = "snowflake-arctic-embed-l-v2.0"
+        
+        print("🚀 Setting up search service and RAG processes for demo...")
+        
+        # 0. Setup PDF text chunker UDF first (required for vector embeddings)
+        print("📝 Setting up PDF text chunker UDF...")
+        setup_pdf_text_chunker_demo(session, database_name, demo_schema)
+        
+        # 1. Create Cortex Search Service on MEDICAL_NOTES table
+        search_service_name = "MEDNOTES_SEARCH_SERVICE"
+        
+        # Check if search service already exists
+        try:
+            search_check_query = f"SHOW CORTEX SEARCH SERVICES LIKE '{search_service_name}' IN {database_name}.{demo_schema}"
+            existing_services = session.sql(search_check_query).collect()
+            
+            if not existing_services:
+                # Create the search service
+                create_search_query = f"""
+                CREATE OR REPLACE CORTEX SEARCH SERVICE {database_name}.{demo_schema}.{search_service_name}
+                  ON TEXT
+                  ATTRIBUTES ADMISSION_TYPE, DIAGNOSIS
+                  WAREHOUSE = {warehouse}
+                  TARGET_LAG = '30 day'
+                  AS (
+                    SELECT
+                        SUBJECT_ID,
+                        ROW_ID,
+                        HADM_ID,
+                        CATEGORY,
+                        ADMISSION_TYPE,
+                        DIAGNOSIS,
+                        TEXT
+                    FROM {database_name}.{demo_schema}.MEDICAL_NOTES
+                );
+                """
+                
+                session.sql(create_search_query).collect()
+                print(f"✓ Created Cortex Search Service '{search_service_name}' on MEDICAL_NOTES table")
+            else:
+                print(f"⏭ Cortex Search Service '{search_service_name}' already exists, skipping creation")
+                
+        except Exception as e:
+            print(f"✗ Failed to create search service '{search_service_name}': {e}")
+        
+        # 2. Setup RAG for Repair Manuals
+        repair_manual_table = "REPAIR_MANUAL_EMBEDDINGS"
+        try:
+            # Check if table already exists
+            table_check_query = f"SHOW TABLES LIKE '{repair_manual_table}' IN {database_name}.{demo_schema}"
+            existing_tables = session.sql(table_check_query).collect()
+            
+            if not existing_tables:
+                # Create notification entry for repair manual RAG process
+                details = f"Creating vector embeddings from {repair_manual_stage} stage using {embedding_model}"
+                notification_id = add_notification_entry(
+                    session, 
+                    "Create Embedding", 
+                    "In-Progress", 
+                    details
+                )
+                
+                print(f"🔄 Starting RAG process for repair manuals (Stage: {repair_manual_stage})")
+                print(f"   Output table: {repair_manual_table}")
+                print(f"   Embedding model: {embedding_model}")
+                
+                # Refresh stage metadata and check if stage has files before processing
+                print(f"🔄 Refreshing stage metadata for {repair_manual_stage}...")
+                try:
+                    # First, refresh the stage to update metadata
+                    refresh_query = f"ALTER STAGE {database_name}.{demo_schema}.{repair_manual_stage} REFRESH"
+                    session.sql(refresh_query).collect()
+                    print(f"✓ Stage {repair_manual_stage} refreshed")
+                except Exception as refresh_error:
+                    print(f"⚠️ Could not refresh stage {repair_manual_stage}: {refresh_error}")
+                
+                # Use LIST command instead of DIRECTORY() for more reliable file detection
+                stage_files_query = f"LIST '@{database_name}.{demo_schema}.{repair_manual_stage}'"
+                try:
+                    file_list = session.sql(stage_files_query).collect()
+                    file_count = len(file_list)
+                    print(f"   Files in stage: {file_count}")
+                    
+                    if file_count > 0:
+                        print(f"   Files found:")
+                        for i, file_info in enumerate(file_list[:5]):
+                            print(f"     - {file_info['name']}")
+                        if file_count > 5:
+                            print(f"     ... and {file_count - 5} more files")
+                    else:
+                        print(f"⚠️ Warning: No files found in stage {repair_manual_stage}")
+                        print(f"⚠️ This might be because files were just uploaded and stage cache needs time to update")
+                        print(f"🔄 Proceeding with embedding creation anyway...")
+                        
+                except Exception as e:
+                    print(f"⚠️ Could not list files in stage {repair_manual_stage}: {e}")
+                    print(f"🔄 Proceeding with embedding creation anyway...")
+                
+                # Create vector embeddings from stage
+                create_vector_embedding_from_stage(
+                    session=session,
+                    db=database_name,
+                    schema=demo_schema,
+                    stage=repair_manual_stage,
+                    embedding_type=embedding_type,
+                    embedding_model=embedding_model,
+                    output_table=repair_manual_table,
+                    # notification_id=notification_id
+                )
+                
+                # Verify embeddings were created
+                try:
+                    count_query = f"SELECT COUNT(*) as count FROM {database_name}.{demo_schema}.{repair_manual_table}"
+                    embedding_count = session.sql(count_query).collect()[0]['COUNT']
+                    print(f"✓ RAG process completed for repair manuals: {embedding_count} embeddings created (Notification ID: {notification_id})")
+                except Exception as count_error:
+                    print(f"⚠️ Could not verify embedding count for repair manuals: {count_error}")
+                    print(f"✓ RAG process initiated for repair manuals (Notification ID: {notification_id})")
+            else:
+                print(f"⏭ Table '{repair_manual_table}' already exists, skipping RAG process for repair manuals")
+                
+        except Exception as e:
+            print(f"✗ Failed to setup RAG for repair manuals: {e}")
+        
+        # 3. Setup RAG for Contracts
+        contracts_table = "CONTRACTS_EMBEDDINGS"
+        try:
+            # Check if table already exists
+            table_check_query = f"SHOW TABLES LIKE '{contracts_table}' IN {database_name}.{demo_schema}"
+            existing_tables = session.sql(table_check_query).collect()
+            
+            if not existing_tables:
+                # Create notification entry for contracts RAG process
+                details = f"Creating vector embeddings from {contracts_stage} stage using {embedding_model}"
+                notification_id = add_notification_entry(
+                    session, 
+                    "Create Embedding", 
+                    "In-Progress", 
+                    details
+                )
+                
+                print(f"🔄 Starting RAG process for contracts (Stage: {contracts_stage})")
+                print(f"   Output table: {contracts_table}")
+                print(f"   Embedding model: {embedding_model}")
+
+                # Refresh stage metadata and check if stage has files before processing
+                print(f"🔄 Refreshing stage metadata for {contracts_stage}...")
+                try:
+                    # First, refresh the stage to update metadata
+                    refresh_query = f"ALTER STAGE {database_name}.{demo_schema}.{contracts_stage} REFRESH"
+                    session.sql(refresh_query).collect()
+                    print(f"✓ Stage {contracts_stage} refreshed")
+                except Exception as refresh_error:
+                    print(f"⚠️ Could not refresh stage {contracts_stage}: {refresh_error}")
+
+                # Use LIST command instead of DIRECTORY() for more reliable file detection
+                stage_files_query = f"LIST '@{database_name}.{demo_schema}.{contracts_stage}'"
+                try:
+                    file_list = session.sql(stage_files_query).collect()
+                    file_count = len(file_list)
+                    print(f"   Files in stage: {file_count}")
+                    
+                    if file_count > 0:
+                        print(f"   Files found:")
+                        for i, file_info in enumerate(file_list[:5]):  # Show first 5 files
+                            print(f"     - {file_info['name']}")
+                        if file_count > 5:
+                            print(f"     ... and {file_count - 5} more files")
+                    else:
+                        print(f"⚠️ Warning: No files found in stage {contracts_stage}")
+                        print(f"⚠️ This might be because files were just uploaded and stage cache needs time to update")
+                        print(f"🔄 Proceeding with embedding creation anyway...")
+                        
+                except Exception as e:
+                    print(f"⚠️ Could not list files in stage {contracts_stage}: {e}")
+                    print(f"🔄 Proceeding with embedding creation anyway...")
+
+                create_vector_embedding_from_stage(
+                    session=session,
+                    db=database_name,
+                    schema=demo_schema,
+                    stage=contracts_stage,
+                    embedding_type=embedding_type,
+                    embedding_model=embedding_model,
+                    output_table=contracts_table,
+                    # notification_id=notification_id
+                )
+                
+                # Verify embeddings were created
+                try:
+                    count_query = f"SELECT COUNT(*) as count FROM {database_name}.{demo_schema}.{contracts_table}"
+                    embedding_count = session.sql(count_query).collect()[0]['COUNT']
+                    print(f"✓ RAG process completed for contracts: {embedding_count} embeddings created (Notification ID: {notification_id})")
+                except Exception as count_error:
+                    print(f"⚠️ Could not verify embedding count for contracts: {count_error}")
+                    print(f"✓ RAG process initiated for contracts (Notification ID: {notification_id})")
+            else:
+                print(f"⏭ Table '{contracts_table}' already exists, skipping RAG process for contracts")
+                
+        except Exception as e:
+            print(f"✗ Failed to setup RAG for contracts: {e}")
+        
+        print("✅ Search service and RAG processes setup completed!")
+        print(f"📋 Summary:")
+        print(f"   • Search Service: {search_service_name} (on MEDICAL_NOTES)")
+        print(f"   • RAG Tables: {repair_manual_table}, {contracts_table}")
+        print(f"   • Embedding Model: {embedding_model}")
+        print(f"   • Note: RAG processes run asynchronously - check notifications for completion status")
+        
+    except Exception as e:
+        print(f"Error setting up search and RAG for demo: {e}")
+        # Don't raise the exception to avoid breaking the application
+        # but log it for debugging purposes
+
+def create_starter_sql(session):
+    """
+    Execute the agent.sql script to set up sales intelligence demo data and infrastructure.
+    This creates sales_conversations and sales_metrics tables with sample data,
+    and sets up a Cortex search service for sales conversation analysis.
+    
+    Args:
+        session: Snowflake session object
+        
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    try:
+        # Use demo configurations from config
+        database_name = config["demo_database"]  # "SNOWFLAKE_AI_TOOLKIT"
+        demo_schema = config["demo_schema"]  # "DEMO"
+        
+        # Quick check: if key components already exist, skip setup
+        try:
+            # Check if both main tables exist and have data
+            tables_check_query = f"""
+                SELECT COUNT(*) as table_count 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_SCHEMA = '{demo_schema}' 
+                AND TABLE_CATALOG = '{database_name}'
+                AND TABLE_NAME IN ('SALES_CONVERSATIONS', 'SALES_METRICS')
+            """
+            table_count = session.sql(tables_check_query).collect()[0]["TABLE_COUNT"]
+            
+            if table_count == 2:
+                # Both tables exist, check if they have data
+                sales_conv_count = session.sql(f"SELECT COUNT(*) as count FROM {database_name}.{demo_schema}.SALES_CONVERSATIONS").collect()[0]["COUNT"]
+                sales_metrics_count = session.sql(f"SELECT COUNT(*) as count FROM {database_name}.{demo_schema}.SALES_METRICS").collect()[0]["COUNT"]
+                
+                if sales_conv_count > 0 and sales_metrics_count > 0:
+                    print("✓ Sales intelligence demo already exists and has data")
+                    print(f"   • SALES_CONVERSATIONS: {sales_conv_count} records")
+                    print(f"   • SALES_METRICS: {sales_metrics_count} records")
+                    print("⏭ Skipping setup - demo environment already configured")
+                    return True, "Sales intelligence demo already exists"
+        except:
+            # If any check fails, proceed with setup
+            pass
+        
+        # Read the agent.sql file
+        agent_sql_path = Path("scripts/agent.sql")
+        if not agent_sql_path.exists():
+            return False, "agent.sql file not found in scripts directory"
+        
+        with open(agent_sql_path, "r") as f:
+            sql_content = f.read()
+        
+        # Split SQL content into individual statements
+        # Remove comments and empty lines, then split by semicolon
+        sql_statements = []
+        
+        # Remove all comment lines first
+        clean_lines = []
+        for line in sql_content.split('\n'):
+            # Skip comment lines that start with --
+            if line.strip().startswith('--'):
+                continue
+            # Skip empty lines
+            if line.strip():
+                clean_lines.append(line)
+        
+        # Join back and split by semicolon to get individual statements
+        clean_sql = '\n'.join(clean_lines)
+        raw_statements = clean_sql.split(';')
+        
+        # Clean up each statement
+        for statement in raw_statements:
+            cleaned = statement.strip()
+            if cleaned:  # Only add non-empty statements
+                sql_statements.append(cleaned)
+        
+        print("🚀 Starting sales intelligence demo setup...")
+        print(f"📝 Found {len(sql_statements)} SQL statements to execute")
+        
+        # Execute each SQL statement
+        for i, statement in enumerate(sql_statements):
+            if not statement or statement.strip() == ';':
+                continue
+                
+            try:
+                print(f"📋 Executing statement {i+1}/{len(sql_statements)}")
+                
+                # Execute the statement
+                session.sql(statement).collect()
+                
+                # Show progress for major operations
+                if 'CREATE TABLE' in statement.upper():
+                    if 'sales_conversations' in statement:
+                        print("✓ Created sales_conversations table")
+                    elif 'sales_metrics' in statement:
+                        print("✓ Created sales_metrics table")
+                elif 'INSERT INTO' in statement.upper():
+                    if 'sales_conversations' in statement:
+                        print("✓ Inserted sample conversation data")
+                    elif 'sales_metrics' in statement:
+                        print("✓ Inserted sample metrics data")
+                elif 'CREATE OR REPLACE WAREHOUSE' in statement.upper():
+                    print("✓ Created sales_intelligence_wh warehouse")
+                elif 'CREATE OR REPLACE CORTEX SEARCH SERVICE' in statement.upper():
+                    print("✓ Created sales_conversation_search service")
+                elif 'ALTER TABLE' in statement.upper() and 'CHANGE_TRACKING' in statement.upper():
+                    print("✓ Enabled change tracking on sales_conversations")
+                    
+            except Exception as e:
+                error_msg = str(e)
+                # Handle specific common errors gracefully
+                if "already exists" in error_msg.lower():
+                    if 'warehouse' in statement.lower():
+                        print("⏭ Warehouse already exists, skipping...")
+                    elif 'table' in statement.lower():
+                        print("⏭ Table already exists, skipping...")
+                    elif 'search service' in statement.lower():
+                        print("⏭ Search service already exists, skipping...")
+                    continue
+                else:
+                    print(f"✗ Error executing statement {i+1}: {error_msg}")
+                    return False, f"Error executing SQL statement {i+1}: {error_msg}"
+        
+        print("🎉 Sales intelligence demo setup completed successfully!")
+        print("📊 You can now use the sales conversation data for AI-powered analysis")
+        
+        return True, "Sales intelligence demo setup completed successfully"
+        
+    except FileNotFoundError:
+        error_msg = "agent.sql file not found in scripts directory"
+        print(f"✗ {error_msg}")
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Error setting up sales intelligence demo: {str(e)}"
+        print(f"✗ {error_msg}")
+        return False, error_msg

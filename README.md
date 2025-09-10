@@ -1,13 +1,12 @@
 # Snowflake AI Toolkit
 
-Snowflake AI Toolkit is an AI Accelerator and Playground for enabling AI in Snowflake. It is an Plug and Play Streamlit based Native App that can be used to explore, learn and build rapid prototypes of AI Solutions in Snowflake powered by the Snowflake's Cortex and AI Functions.
+Snowflake AI Toolkit is an AI Accelerator and Playground for enabling AI in Snowflake. It is a Plug and Play Streamlit-based Native App that lets you explore, learn, and rapidly prototype AI solutions powered by Snowflake's Cortex and AI Functions. In addition to these capabilities, the toolkit automatically sets up your environment and provides prebuilt use cases to try all Cortex features—from simple prompting to advanced agentic solutions.
 
 # Features
 
 ### Playground
 
-An interactive environment where users can chat and experiment with Snowflake Cortex functions, test prompts, and and play around with cortex functions.
-Supports both manual text entry and voice-to-text input for prompts wherever needed, across multiple functions including Complete, Translate, Extract, Sentiment Analysis, and AI Complete (debug mode only)
+An interactive environment where users can chat and experiment with Snowflake Cortex functions, test prompts, and explore Cortex capabilities. Supports both manual text entry and voice-to-text input for prompts across multiple functions—including Complete, Translate, Extract, Sentiment Analysis, and AI Complete (debug mode only). Additionally, audio output is available for responses, enabling users to listen to results as well as view them.
 
 ### Build
 

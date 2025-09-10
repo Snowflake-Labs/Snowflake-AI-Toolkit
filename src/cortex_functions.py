@@ -775,6 +775,7 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
     else:
         columns.append("vector_embeddings VECTOR(FLOAT, 1024)")
     # Ensure the output table exists with the required columns
+    print(f"📋 Creating/checking output table: {output_table_full}")
     check_and_create_table(session, db, schema, output_table, columns)
 
     # Construct the SQL query to process all files in the stage
@@ -792,13 +793,16 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
         TABLE(pdf_text_chunker(build_scoped_file_url('{stage_path}', relative_path))) AS func;
     """
     try:
+        print(f"📝 Executing embedding query for stage {stage_path}:")
         print(query)
         session.sql(query).collect()
         end_time = datetime.now()
         
         # Count how many chunks were processed
+        print(f"📊 Checking final record count in {output_table_full}...")
         chunk_count_query = f"SELECT COUNT(*) as count FROM {output_table_full}"
         chunk_count = session.sql(chunk_count_query).collect()[0]['COUNT']
+        print(f"📊 Total records in output table: {chunk_count}")
         
         # Estimate tokens for embedding operation
         estimated_total_tokens = chunk_count * 200  # Rough estimate per chunk for embeddings
@@ -815,7 +819,10 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
             details=f"Vector embedding creation: {chunk_count} chunks processed from stage {stage}"
         )
         
-        st.success(f"Vector embeddings created successfully for all files in {stage}. Results saved to {output_table}.")
+        try:
+            st.success(f"Vector embeddings created successfully for all files in {stage}. Results saved to {output_table}.")
+        except:
+            print(f"✓ Vector embeddings created successfully for all files in {stage}. Results saved to {output_table}.")
         
     except SnowparkSQLException as e:
         end_time = datetime.now()
@@ -827,7 +834,10 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
             end_time=end_time,
             details=f"Vector embedding creation failed: {str(e)}"
         )
-        st.error(f"Failed to create embeddings: {e}")
+        try:
+            st.error(f"Failed to create embeddings: {e}")
+        except:
+            print(f"✗ Failed to create embeddings: {e}")
         raise e
 
 def create_cortex_search_service(session, database, schema, table, column, attributes, service_name, embedding_model, warehouse):

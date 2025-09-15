@@ -103,4 +103,14 @@
   "snowflake_account_base_url": "",
   "rsa_public_key_fp": "",
   "rsa_private_key": ""
+  "demo_database": "SNOWFLAKE_AI_TOOLKIT",
+  "demo_schema": "DEMO",
+  "my_images": "MY_IMAGES",
+  "contracts": "CONTRACTS",
+  "repair_manual": "REPAIR_MANUAL",
+  "store_view": "SAMPLE_STORES",
+  "store_returns_view": "SAMPLE_STORE_RETURNS",
+  "store_sales_view": "SAMPLE_STORE_SALES",
+  "medical_notes_view": "MEDICAL_NOTES",
+  "reason_view": "SAMPLE_REASON"
 }

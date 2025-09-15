@@ -11,7 +11,6 @@ from snowflake.core import Root
 from src.utils import *
 from pathlib import Path
 from src.cortex_agent import *
-from src.demo import *
 
 # Import default parameters
 try:

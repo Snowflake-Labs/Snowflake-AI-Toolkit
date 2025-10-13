@@ -102,7 +102,7 @@
   "stage": "SF_AI_STAGE",
   "snowflake_account_base_url": "",
   "rsa_public_key_fp": "",
-  "rsa_private_key": ""
+  "rsa_private_key": "",
   "demo_database": "SNOWFLAKE_AI_TOOLKIT",
   "demo_schema": "DEMO",
   "my_images": "MY_IMAGES",

@@ -319,17 +319,18 @@ def log_cortex_usage(session: Session, function_name: str, model_name: str = Non
 
 def execute_cortex_with_logging(session: Session, cortex_query: str, function_name: str = None, 
                                model_name: str = None, input_text: str = None, 
-                               warehouse_id: str = None, **kwargs) -> tuple:
+                               warehouse_id: str = None, query_params=None, **kwargs) -> tuple:
     """
     Universal wrapper for any Cortex function that automatically logs usage details.
     
     Args:
         session (Session): Active Snowflake session object
-        cortex_query (str): The complete Cortex SQL query to execute
+    cortex_query (str): The Cortex SQL query to execute (can include '?' placeholders)
         function_name (str, optional): Name of the Cortex function (auto-detected if not provided)
         model_name (str, optional): Model name used (for functions that use models)
         input_text (str, optional): Input text for token estimation
         warehouse_id (str, optional): Warehouse ID
+    query_params (list | tuple | None): Optional parameters to bind to the query
         **kwargs: Additional parameters for logging
         
     Returns:
@@ -386,8 +387,11 @@ def execute_cortex_with_logging(session: Session, cortex_query: str, function_na
         input_tokens = max(1, len(input_text) // 4)
     
     try:
-        # Execute the Cortex query
-        result = session.sql(cortex_query).collect()
+        # Execute the Cortex query (bind parameters if provided)
+        if query_params is not None:
+            result = session.sql(cortex_query, query_params).collect()
+        else:
+            result = session.sql(cortex_query).collect()
         end_time = datetime.now()
         
         if result:
@@ -484,16 +488,34 @@ def cortex_complete(session: Session, model: str, prompt: str, **options):
     Returns:
         tuple: (result, notification_id)
     """
-    # Build query with options
-    if options:
-        options_obj = "OBJECT_CONSTRUCT(" + ", ".join([f"'{k}', {v}" for k, v in options.items()]) + ")"
-        query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{model}', '{escape_sql_string(prompt)}', {options_obj}) as result"
+    # Build parameterized query to prevent SQL injection.
+    # Support common options: temperature, max_tokens, guardrails. Others remain for logging only.
+    temperature = options.get("temperature")
+    max_tokens = options.get("max_tokens")
+    guardrails = options.get("guardrails")
+
+    params = [model, prompt]
+    object_pairs = []
+    if temperature is not None:
+        object_pairs.append("'temperature', ?")
+        params.append(temperature)
+    if max_tokens is not None:
+        object_pairs.append("'max_tokens', ?")
+        params.append(max_tokens)
+    if guardrails is not None:
+        object_pairs.append("'guardrails', ?")
+        params.append(guardrails)
+
+    if object_pairs:
+        options_object = f"OBJECT_CONSTRUCT({', '.join(object_pairs)})"
+        query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?, {options_object}) as result"
     else:
-        query = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{model}', '{escape_sql_string(prompt)}') as result"
-    
+        query = "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) as result"
+
     return execute_cortex_with_logging(
         session=session,
         cortex_query=query,
+        query_params=params,
         function_name="COMPLETE",
         model_name=model,
         input_text=prompt,

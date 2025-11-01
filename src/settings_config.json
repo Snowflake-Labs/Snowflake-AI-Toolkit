@@ -1,5 +1,18 @@
 {
-  "mode": "debug",
+  "mode": "native",
+  "demo_setup_mode": 2,
+  "snowflake_connection": {
+    "account": "",
+    "user": "",
+    "password": "",
+    "role": "ACCOUNTADMIN",
+    "warehouse": "COMPUTE_WH",
+    "database": "SNOWFLAKE_AI_TOOLKIT",
+    "schema": "PUBLIC",
+    "account_base_url": "",
+    "rsa_public_key_fp": "",
+    "rsa_private_key": ""
+  },
   "default_settings": {
     "model": [
       "claude-3-5-sonnet",
@@ -92,20 +105,11 @@
       ]
     }
   },
-  "account": "",
-  "user": "",
-  "password": "",
-  "role": "",
-  "warehouse": "COMPUTE_WH",
-  "database": "SNOWFLAKE_AI_TOOLKIT",
-  "schema": "PUBLIC",
   "stage": "SF_AI_STAGE",
-  "snowflake_account_base_url": "",
-  "rsa_public_key_fp": "",
-  "rsa_private_key": ""
   "demo_database": "SNOWFLAKE_AI_TOOLKIT",
   "demo_schema": "DEMO",
   "my_images": "MY_IMAGES",
+  "my_audios": "MY_AUDIOS",
   "contracts": "CONTRACTS",
   "repair_manual": "REPAIR_MANUAL",
   "store_view": "SAMPLE_STORES",

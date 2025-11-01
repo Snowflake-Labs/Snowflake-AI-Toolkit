@@ -96,7 +96,7 @@ VALUES
 ALTER TABLE sales_conversations SET CHANGE_TRACKING = TRUE;
 
 -- Create the search service
-CREATE OR REPLACE CORTEX SEARCH SERVICE sales_conversation_search
+CREATE OR REPLACE CORTEX SEARCH SERVICE sales_conversation_search_Demo
   ON transcript_text
   ATTRIBUTES customer_name, deal_stage, sales_rep, product_line, conversation_date, deal_value
   WAREHOUSE = sales_intelligence_wh -- change this from sales_intelligence_wh to an existing one that is created for trial accounts

@@ -1,19 +1,20 @@
 import streamlit as st
-from src.utils import *
-from src import home, playground, build, notification, setup
+from src.utils import (
+    render_image,
+    check_setup_status,
+    run_setup_silently,
+)
+from src import home, playground, build, notification
 from snowflake.snowpark.context import get_active_session
+from snowflake.snowpark.session import Session
 from pathlib import Path
 import json
-from snowflake.snowpark.exceptions import SnowparkSQLException
-from src.notification import *
-from src.search import *
-from src.cortex_agent import *
+from src.search import display_search
+from src.cortex_agent import (
+    display_cortex_agent,
+)
 from src.settings import display_settings
-# from trulens.connectors.snowflake import SnowflakeConnector
-# from trulens.core.session import TruSession
-# from trulens.dashboard import run_dashboard
-# for key in st.session_state.keys():
-#     del st.session_state[key]
+
 # Load the config file
 config_path = Path("src/settings_config.json")
 with open(config_path, "r") as f:
@@ -23,10 +24,10 @@ with open(config_path, "r") as f:
 st.set_page_config(page_title="Snowflake AI Toolkit", layout="wide")
 
 # Ensure session state variables are initialized
-if 'page' not in st.session_state:
+if "page" not in st.session_state:
     st.session_state.page = "Home"  # Default page
 
-if 'snowflake_session' not in st.session_state:
+if "snowflake_session" not in st.session_state:
     st.session_state.snowflake_session = None
 
 if "legacy_function" not in st.session_state:
@@ -48,51 +49,153 @@ if st.session_state.snowflake_session is None:
             st.error(f"Failed to get active session in native mode: {e}")
     elif config["mode"] == "debug":
         try:
-            connection_parameters = {
-                "account": config["account"],"user": config["user"],"password": config["password"],
-                "role": config["role"],"warehouse": config["warehouse"],"database": config["database"],
-                "schema": config["schema"]
-                # "passcode": config["passcode"],
-                # "init_server_side": True
-            }
+            # Get Snowflake configuration from JSON file
+            from src.utils import get_snowflake_config
+
+            snowflake_config = get_snowflake_config()
+
+            # Extract connection parameters
+            account = snowflake_config.get("account")
+            user = snowflake_config.get("user")
+            password = snowflake_config.get("password")
+            role = snowflake_config.get("role")
+            warehouse = snowflake_config.get("warehouse")
+            database = snowflake_config.get("database")
+            schema = snowflake_config.get("schema")
+
+            missing_vars = []
+            if not all([account, user, password, role, warehouse, database, schema]):
+                # Check which required fields are missing
+                missing_vars = [
+                    var
+                    for var, val in [
+                        ("account", account),
+                        ("user", user),
+                        ("password", password),
+                        ("role", role),
+                        ("warehouse", warehouse),
+                        ("database", database),
+                        ("schema", schema),
+                    ]
+                    if not val
+                ]
+
+            if missing_vars:
+                st.error(
+                    f"Missing Snowflake configuration fields in settings_config.json: {', '.join(missing_vars)}"
+                )
+                st.stop()
+
+            private_key_path = snowflake_config.get("private_key_path")
+            private_key_passphrase = snowflake_config.get("private_key_passphrase")
+            private_key = snowflake_config.get("private_key")
+
+            connection_parameters = {}
+            if private_key_path and private_key_passphrase:
+                connection_parameters = {
+                    "account": account,
+                    "user": user,
+                    "private_key_file": private_key_path,
+                    "private_key_file_pwd": private_key_passphrase,
+                    "role": role,
+                    "warehouse": warehouse,
+                    "database": database,
+                    "schema": schema,
+                }
+            elif private_key:
+                # Use inline private key
+                connection_parameters = {
+                    "account": account,
+                    "user": user,
+                    "private_key": private_key,
+                    "role": role,
+                    "warehouse": warehouse,
+                    "database": database,
+                    "schema": schema,
+                }
+            else:
+                connection_parameters = {
+                    "account": account,
+                    "user": user,
+                    "password": password,
+                    "role": role,
+                    "warehouse": warehouse,
+                    "database": database,
+                    "schema": schema,
+                }
             # connector = SnowflakeConnector(**connection_parameters)
             # truelens_session = TruSession(connector)
             # st.session_state.truelens_session = truelens_session
             # run_dashboard(truelens_session)
-            st.session_state.snowflake_session = Session.builder.configs(connection_parameters).create()
+            st.session_state.snowflake_session = Session.builder.configs(
+                connection_parameters
+            ).create()
         except Exception as e:
             st.error(f"Failed to create session in debug mode: {e}")
 
-
-# Set up UDF at app start
-setup_pdf_text_chunker(st.session_state.snowflake_session)
 
 # Check if session is successfully created
 if st.session_state.snowflake_session is None:
     st.error("Failed to connect to Snowflake.")
 else:
+    # Get demo setup mode from config
+    # 0 = Skip setup completely
+    # 1 = Check setup status only (don't install)
+    # 2 = Check and install if needed (default)
+    demo_setup_mode = config.get("demo_setup_mode", 2)
+
     # Only run setup functions once on first load
-    if not st.session_state.setup_completed:
-        try:
-            with st.spinner("Setting up the environment... This may take a few moments."):
-                create_database_and_stage_if_not_exists(st.session_state.snowflake_session)
-                create_demo_database_and_stage_if_not_exists(st.session_state.snowflake_session)
-                create_stages_tables_for_demo(st.session_state.snowflake_session)
-                setup_pdf_text_chunker_demo(st.session_state.snowflake_session, config["demo_database"], config["demo_schema"])
-                create_search_and_rag_for_demo(st.session_state.snowflake_session)
-                create_starter_sql(st.session_state.snowflake_session)
-            
-            # Mark setup as completed
+    if not st.session_state.setup_completed and demo_setup_mode > 0:
+        # Check if setup is already complete
+        is_setup_complete, status_message = check_setup_status(
+            st.session_state.snowflake_session
+        )
+
+        print(f"Setup status: {status_message}")
+
+        if is_setup_complete:
+            # Setup is already complete
             st.session_state.setup_completed = True
-            # st.success("✅ Demo environment setup completed!")
-            
-        except Exception as e:
-            st.error(f"Error while setting up demo environment: {e}")
-            # Don't mark as completed if there was an error
-            st.session_state.setup_completed = False
+        elif demo_setup_mode == 2:
+            # Setup is needed and installation is enabled
+            try:
+                with st.spinner(
+                    "Setting up the environment... This may take a few moments."
+                ):
+                    # Run setup functions with minimal output
+                    print("Running setup...")
+                    success, message = run_setup_silently(
+                        st.session_state.snowflake_session, config
+                    )
+
+                    if not success:
+                        raise Exception(message)
+
+                # Mark setup as completed and show success message
+                st.session_state.setup_completed = True
+                # with st.sidebar:
+                #     st.success("✅ Demo environment setup completed!")
+
+            except Exception as e:
+                st.error(f"Error while setting up demo environment: {e}")
+                # Don't mark as completed if there was an error
+                st.session_state.setup_completed = False
+        else:
+            # demo_setup_mode == 1: Check only, don't install
+            if not is_setup_complete:
+                st.warning(
+                    "⚠️ Demo environment is not set up. Please run setup manually or set demo_setup_mode to 2 in settings_config.json"
+                )
+            st.session_state.setup_completed = (
+                True  # Mark as completed to avoid repeated checks
+            )
+    elif demo_setup_mode == 0:
+        # Skip setup completely
+        st.session_state.setup_completed = True
 
 # Load custom CSS for sidebar styling
-st.markdown("""
+st.markdown(
+    """
     <style>
             
     /* Sidebar Background */
@@ -124,7 +227,9 @@ st.markdown("""
         } 
             
     </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # Sidebar Navigation with logo
@@ -165,7 +270,7 @@ pages = {
     "Cortex Search": display_search,
     "Cortex Agent": display_cortex_agent,
     # "Setup": setup.display_setup,
-    "Settings": display_settings
+    "Settings": display_settings,
 }
 
 # Render the selected page from the pages dictionary

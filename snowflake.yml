@@ -3,7 +3,7 @@ definition_version: '2'
 entities:
   streamlit:
     type: streamlit
-    identifier: snowflake_ai_toolkit
+    identifier: snowflake_ai_toolkit_kavi_demo
     stage: sf_ai_stage
     query_warehouse: compute_wh
     main_file: streamlit_app.py
@@ -34,6 +34,10 @@ entities:
       - src/search.py
       - src/settings.py
       - src/defaults.py
+      - src/audio_components.py
+      - src/display_aisql.py
+      - src/display_chat.py
+      - src/playground_settings.py
       - environment.yml
       - data/
       - scripts/

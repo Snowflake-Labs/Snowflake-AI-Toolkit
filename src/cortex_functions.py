@@ -1,15 +1,18 @@
 from snowflake.snowpark.exceptions import SnowparkSQLException
 import json
 import streamlit as st
-from src.notification import execute_cortex_with_logging, escape_sql_string as notification_escape_sql_string
+from src.notification import (
+    execute_cortex_with_logging,
+    escape_sql_string as notification_escape_sql_string,
+)
 
 
 def escape_sql_string(s):
     """Helper function to escape single quotes in SQL strings.
-    
+
     Args:
         s (str): The SQL string to escape.
-        
+
     Returns:
         str: The escaped SQL string with single quotes doubled.
     """
@@ -39,8 +42,7 @@ def check_and_create_table(session, db, schema, table, columns):
     if table_exists:
         truncate_query = f"DROP TABLE {full_table_name}"
         session.sql(truncate_query).collect()
-        print(f"Table {full_table_name} dropped successfully.")     
-
+        print(f"Table {full_table_name} dropped successfully.")
 
     # Create the table if it doesn't exist
     columns_definition = ", ".join(columns)
@@ -50,10 +52,11 @@ def check_and_create_table(session, db, schema, table, columns):
     return
 
 
-
-def get_complete_result(session, model, prompt, temperature, max_tokens, guardrails, system_prompt=None):
+def get_complete_result(
+    session, model, prompt, temperature, max_tokens, guardrails, system_prompt=None
+):
     """Handles the Complete functionality in playground mode.
-    
+
     Args:
         session: Snowflake session.
         model (str): The model to use for completion.
@@ -62,17 +65,17 @@ def get_complete_result(session, model, prompt, temperature, max_tokens, guardra
         max_tokens (int): Maximum tokens to generate.
         guardrails (bool): Whether to enable guardrails.
         system_prompt (str, optional): System prompt to prepend.
-        
+
     Returns:
         dict: The completion result from the model.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     messages = []
     if system_prompt:
-        messages.append({'role': 'system', 'content': system_prompt})
-    messages.append({'role': 'user', 'content': prompt})
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
 
     # Use parameterized query to avoid JSON escaping issues
     query = """
@@ -86,22 +89,22 @@ def get_complete_result(session, model, prompt, temperature, max_tokens, guardra
         )
     );
     """
-    
+
     # Parameters for the query
     params = [
         model,
         json.dumps(messages),  # JSON string without SQL escaping
         temperature,
         max_tokens,
-        guardrails
+        guardrails,
     ]
-    
+
     print("messages: ", messages)
     print("query parameters: ", params)
     try:
         result = session.sql(query, params).collect()[0][0]
         print("result: ", result)
-        
+
         # Parse the result if it's a JSON string
         if isinstance(result, str):
             try:
@@ -112,28 +115,29 @@ def get_complete_result(session, model, prompt, temperature, max_tokens, guardra
                 return {
                     "choices": [{"messages": result}],
                     "model": "unknown",
-                    "usage": {}
+                    "usage": {},
                 }
         else:
             # If result is already a dict/object, return as is
             return result
-            
+
     except SnowparkSQLException as e:
         raise e
 
+
 def get_complete_multimodal_result(session, model, prompt, stage, files):
     """Handles the Complete functionality in playground mode for multimodal inputs.
-    
+
     Args:
         session: Snowflake session.
         model (str): The model to use for completion.
         prompt (str): The user prompt text.
         stage (str): Stage name containing files.
         files (list): List of file names to include in the prompt.
-        
+
     Returns:
         dict: The completion result from the model.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
@@ -165,18 +169,19 @@ def get_complete_multimodal_result(session, model, prompt, stage, files):
         except SnowparkSQLException as e:
             raise e
 
+
 def get_translation(session, text, source_lang, target_lang):
     """Handles the Translate functionality in playground mode using SQL.
-    
+
     Args:
         session: Snowflake session.
         text (str): Text to translate.
         source_lang (str): Source language code.
         target_lang (str): Target language code.
-        
+
     Returns:
         str: The translated text.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
@@ -190,16 +195,277 @@ def get_translation(session, text, source_lang, target_lang):
         raise e
 
 
+def get_ai_transcribe_result(session, stage, audio_file, timestamp_granularity=None):
+    """
+    Transcribe audio file using Snowflake's AI_TRANSCRIBE function.
+
+    Args:
+        session: Snowflake session.
+        stage (str): Stage name containing the audio file.
+        audio_file (str): Audio file name.
+        timestamp_granularity (str): None, "word", or "speaker".
+
+    Returns:
+        dict: Transcription result with audio_duration, text, and optional segments.
+    """
+    # Clean stage path - remove @ symbol if present, then add it back in quotes
+    clean_stage = stage.lstrip("@") if stage.startswith("@") else stage
+
+    # Build options object if timestamp_granularity is specified
+    options_part = ""
+    if timestamp_granularity and timestamp_granularity in ["word", "speaker"]:
+        options_part = (
+            f", OBJECT_CONSTRUCT('timestamp_granularity', '{timestamp_granularity}')"
+        )
+
+    query = f"""
+        SELECT AI_TRANSCRIBE(
+            TO_FILE('@{clean_stage}', '{audio_file}'){options_part}
+        )
+    """
+
+    try:
+        result = execute_cortex_with_logging(session, query, "AI_TRANSCRIBE")
+        print(f"🔍 AI_TRANSCRIBE raw result type: {type(result)}")
+        print(f"🔍 AI_TRANSCRIBE raw result: {str(result)[:200]}...")
+
+        # Handle different result formats
+        if isinstance(result, list) and len(result) > 0:
+            # If result is a list of rows
+            if isinstance(result[0], dict):
+                # If first row is a dict, try to extract the result
+                transcription_json = list(result[0].values())[0]
+            elif isinstance(result[0], (list, tuple)) and len(result[0]) > 0:
+                # If first row is a list/tuple, take the first element
+                transcription_json = result[0][0]
+            else:
+                # Use the first item directly
+                transcription_json = result[0]
+        elif isinstance(result, tuple) and len(result) > 0:
+            # If result is a tuple, take the first element
+            transcription_json = result[0]
+        else:
+            # If result is not a list or tuple, use it directly
+            transcription_json = result
+
+        print(f"🔍 Transcription JSON type: {type(transcription_json)}")
+        print(f"🔍 Transcription JSON: {str(transcription_json)[:200]}...")
+
+        # Handle different transcription_json types
+        if isinstance(transcription_json, str):
+            print("🔄 Parsing JSON string...")
+            try:
+                parsed_result = json.loads(transcription_json)
+                return parsed_result
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON decode error: {e}")
+                return {
+                    "error": f"Failed to parse JSON response: {e}",
+                    "raw_response": transcription_json,
+                }
+        elif isinstance(transcription_json, dict):
+            print("🔄 Using result as-is (already a dictionary)")
+            return transcription_json
+        else:
+            print(f"🔄 Unexpected transcription_json type: {type(transcription_json)}")
+            # Try to convert to string and then parse
+            try:
+                transcription_str = str(transcription_json)
+                print(f"🔄 Converted to string, attempting JSON parse...")
+                parsed_result = json.loads(transcription_str)
+                return parsed_result
+            except (json.JSONDecodeError, TypeError) as e:
+                print(f"❌ Failed to parse as JSON: {e}")
+                return {
+                    "error": f"Unexpected result format: {type(transcription_json)}",
+                    "raw_response": str(transcription_json),
+                }
+    except Exception as e:
+        print(f"❌ Exception in get_ai_transcribe_result: {e}")
+        return {"error": str(e)}
+
+
+def get_ai_parse_document(
+    session, stage, file, mode="OCR", page_split=False, page_filter=None
+):
+    """
+    Enhanced document parsing using Snowflake's AI_PARSE_DOCUMENT function.
+
+    Args:
+        session: Snowflake session.
+        stage (str): Stage path (e.g., '@DB.SCHEMA.STAGE').
+        file (str): File name to parse.
+        mode (str): Parsing mode - "OCR" (text only) or "LAYOUT" (text + structure).
+        page_split (bool): Split document into pages for processing.
+        page_filter (list): Page ranges to process [{"start": 0, "end": 2}].
+
+    Returns:
+        dict: Parsed document with pages, content, metadata, and error information.
+    """
+    print(f"🔍 AI_PARSE_DOCUMENT DEBUG - Starting with:")
+    print(f"   Stage: {stage}")
+    print(f"   File: {file}")
+    print(f"   Mode: {mode}")
+    print(f"   Page Split: {page_split}")
+    print(f"   Page Filter: {page_filter}")
+
+    # Build options object
+    options = {"mode": mode}
+
+    if page_split:
+        options["page_split"] = True
+
+    if page_filter and isinstance(page_filter, list):
+        options["page_filter"] = page_filter
+        # page_filter implies page_split
+        options["page_split"] = True
+
+    print(f"🔧 Options built: {options}")
+
+    # Convert options to SQL object construct
+    if options:
+        options_parts = []
+        for key, value in options.items():
+            if isinstance(value, bool):
+                options_parts.append(f"'{key}', {str(value).upper()}")
+            elif isinstance(value, list):
+                # Handle page_filter array
+                filter_objects = []
+                for page_range in value:
+                    if (
+                        isinstance(page_range, dict)
+                        and "start" in page_range
+                        and "end" in page_range
+                    ):
+                        filter_objects.append(
+                            f"OBJECT_CONSTRUCT('start', {page_range['start']}, 'end', {page_range['end']})"
+                        )
+                if filter_objects:
+                    array_str = f"ARRAY_CONSTRUCT({', '.join(filter_objects)})"
+                    options_parts.append(f"'{key}', {array_str}")
+            else:
+                options_parts.append(f"'{key}', '{value}'")
+
+        options_str = f", OBJECT_CONSTRUCT({', '.join(options_parts)})"
+    else:
+        options_str = ""
+
+    print(f"🔧 Options string: {options_str}")
+
+    query = f"""
+        SELECT AI_PARSE_DOCUMENT(
+            TO_FILE('{stage}', '{file}'){options_str}
+        ) as parse_result
+    """
+
+    print(f"📝 Executing query:")
+    print(query)
+
+    try:
+        print("⚙️ Calling execute_cortex_with_logging...")
+        result = execute_cortex_with_logging(session, query, "AI_PARSE_DOCUMENT")
+        # print(f"� Raw result written to: {temp_file_raw}")
+
+        # Parse the JSON result - handle different result formats
+        if isinstance(result, list) and len(result) > 0:
+            # If result is a list of rows
+            if isinstance(result[0], dict) and "PARSE_RESULT" in result[0]:
+                parse_json = result[0]["PARSE_RESULT"]
+                print("🔑 Found PARSE_RESULT key")
+            elif isinstance(result[0], (list, tuple)) and len(result[0]) > 0:
+                parse_json = result[0][0]
+                print("🔑 Using first element of first row")
+            else:
+                parse_json = result[0]
+                print("🔑 Using first item directly")
+        else:
+            # If result is a single value
+            parse_json = result
+            print("📋 Result is not a list, using directly")
+
+        # Handle tuple results (common with execute_cortex_with_logging)
+        if isinstance(parse_json, tuple) and len(parse_json) > 0:
+            print(f"🔄 Parse JSON is a tuple with {len(parse_json)} elements")
+            parse_json = parse_json[0]  # Take the first element (the JSON string)
+            print("🔑 Using first element of tuple")
+
+        print(f"🔍 Parse JSON type: {type(parse_json)}")
+        print(
+            f"🔍 Parse JSON length: {len(str(parse_json)) if parse_json else 0} characters"
+        )
+
+        # Handle different parse_json types
+        if isinstance(parse_json, str):
+            print("🔄 Parsing JSON string...")
+            try:
+                parsed_result = json.loads(parse_json)
+            except json.JSONDecodeError as e:
+                print(f"❌ JSON decode error: {e}")
+                return {"error": f"Failed to parse JSON response: {e}"}
+        elif isinstance(parse_json, dict):
+            print("🔄 Using result as-is (already a dictionary)")
+            parsed_result = parse_json
+        else:
+            print(f"🔄 Unexpected parse_json type: {type(parse_json)}")
+            # Try to convert to string and then parse
+            try:
+                parse_json_str = str(parse_json)
+                print(f"🔄 Converted to string, attempting JSON parse...")
+                parsed_result = json.loads(parse_json_str)
+            except (json.JSONDecodeError, TypeError) as e:
+                print(f"❌ Failed to parse as JSON: {e}")
+                return {
+                    "error": f"Unexpected result format: {type(parse_json)}, content: {str(parse_json)[:200]}..."
+                }
+
+        print(f"✅ Final parsed result type: {type(parsed_result)}")
+        print(
+            f"✅ Final parsed result length: {len(str(parsed_result)) if parsed_result else 0} characters"
+        )
+        return parsed_result
+    except Exception as e:
+        print(f"❌ Exception occurred: {type(e).__name__}: {str(e)}")
+        import traceback
+
+        print(f"❌ Full traceback: {traceback.format_exc()}")
+        return {"error": str(e)}
+
+
+def get_ai_translation(session, text, source_lang, target_lang):
+    """Handles the AI Translate functionality in playground mode using SQL.
+
+    Args:
+        session: Snowflake session.
+        text (str): Text to translate.
+        source_lang (str): Source language code.
+        target_lang (str): Target language code.
+
+    Returns:
+        str: The translated text.
+
+    Raises:
+        SnowparkSQLException: If the query fails.
+    """
+    query = f"""
+    SELECT AI_TRANSLATE('{escape_sql_string(text)}', '{source_lang}', '{target_lang}');
+    """
+    try:
+        result = session.sql(query).collect()[0][0]
+        return result
+    except SnowparkSQLException as e:
+        raise e
+
+
 def get_summary(session, text):
     """Handles the Summarize functionality in playground mode using SQL.
-    
+
     Args:
         session: Snowflake session.
         text (str): Text to summarize.
-        
+
     Returns:
         str: The summarized text.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
@@ -215,15 +481,15 @@ def get_summary(session, text):
 
 def get_extraction(session, text, query_text):
     """Handles the Extract functionality in playground mode using SQL.
-    
+
     Args:
         session: Snowflake session.
         text (str): Source text to extract from.
         query_text (str): Query text to guide extraction.
-        
+
     Returns:
         str: The extracted answer.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
@@ -240,14 +506,14 @@ def get_extraction(session, text, query_text):
 
 def get_sentiment(session, text):
     """Handles the Sentiment functionality in playground mode using SQL.
-    
+
     Args:
         session: Snowflake session.
         text (str): Text to analyze sentiment.
-        
+
     Returns:
         str: The sentiment analysis result.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
@@ -259,31 +525,32 @@ def get_sentiment(session, text):
         return result
     except SnowparkSQLException as e:
         raise e
-    
+
+
 def get_classification(session, text, categories):
     """Handles the Classification functionality in playground mode using SQL.
-    
+
     Args:
         session: Snowflake session.
         text (str): Text to classify.
         categories (list): List of categories for classification.
-        
+
     Returns:
         str: The classification result.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     # Convert categories string to list of strings, categories are separated by commas
     categories = [f"'{category}'" for category in categories.split(",")]
-    print("categories_str: ",categories)
+    print("categories_str: ", categories)
     query = f"""
-    SELECT SNOWFLAKE.CORTEX.CLASSIFY_TEXT('{text}', ARRAY_CONSTRUCT({','.join(categories)}));
+    SELECT SNOWFLAKE.CORTEX.CLASSIFY_TEXT('{text}', ARRAY_CONSTRUCT({",".join(categories)}));
     """
-    print("query: ",query)
+    print("query: ", query)
     try:
         result = session.sql(query).collect()[0][0]
-        print("result: ",result)
+        print("result: ", result)
         return result
     except SnowparkSQLException as e:
         raise e
@@ -291,30 +558,30 @@ def get_classification(session, text, categories):
 
 def get_parse_document(session, stage, file, mode):
     """Handles the Parse Document functionality in playground mode using SQL.
-    
+
     Args:
         session: Snowflake session.
         stage (str): Stage name containing files.
         file (str): File name to parse.
         mode (str): Mode for parsing (e.g., 'OCR', 'LAYOUT').
-        
+
     Returns:
         str: The parsed document content.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     # Ensure stage and file are properly quoted for SQL
     stage = f"'{stage}'"
     file = f"'{file}'"
-    
+
     print("stage: ", stage)
     print("file: ", file)
     print("mode: ", mode)
-    
+
     # Format the mode parameter as a JSON-like string
     mode_param = "{'mode': 'OCR'}" if mode == "OCR" else "{'mode': 'LAYOUT'}"
-    
+
     query = f"""
         SELECT TO_VARCHAR(
             SNOWFLAKE.CORTEX.PARSE_DOCUMENT(
@@ -324,7 +591,7 @@ def get_parse_document(session, stage, file, mode):
             )
         ) AS result;
     """
-    
+
     print("query: ", query)
     try:
         result = session.sql(query).collect()[0][0]
@@ -332,37 +599,53 @@ def get_parse_document(session, stage, file, mode):
     except SnowparkSQLException as e:
         raise e
 
+
 def get_entity_sentiment(session, text, entities):
     """Handles the Entity Sentiment functionality in playground mode using SQL.
-    
+
     Args:
         session: Snowflake session.
         text (str): Text to analyze entity sentiment.
         entities (list): List of entities to analyze.
-        
+
     Returns:
         str: The entity sentiment analysis result.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     # Convert entities string to list of strings, entities are separated by commas
     entities = [f"'{entity}'" for entity in entities.split(",")]
-    print("entities_str: ",entities)
+    print("entities_str: ", entities)
     query = f"""
-    SELECT SNOWFLAKE.CORTEX.ENTITY_SENTIMENT('{text}', ARRAY_CONSTRUCT({','.join(entities)}));
+    SELECT SNOWFLAKE.CORTEX.ENTITY_SENTIMENT('{text}', ARRAY_CONSTRUCT({",".join(entities)}));
     """
-    print("query: ",query)
+    print("query: ", query)
     try:
         result = session.sql(query).collect()[0][0]
-        print("result: ",result)
+        print("result: ", result)
         return result
     except SnowparkSQLException as e:
         raise e
 
-def get_complete_result_from_column(session, model, db, schema, table, input_column, temperature, max_tokens, guardrails, output_table, output_column, system_prompt=None, user_prompt=None):
+
+def get_complete_result_from_column(
+    session,
+    model,
+    db,
+    schema,
+    table,
+    input_column,
+    temperature,
+    max_tokens,
+    guardrails,
+    output_table,
+    output_column,
+    system_prompt=None,
+    user_prompt=None,
+):
     """Fetches content from a column and writes the completion result to an output table.
-    
+
     Args:
         session: Snowflake session.
         model (str): The model to use for completion.
@@ -377,19 +660,19 @@ def get_complete_result_from_column(session, model, db, schema, table, input_col
         output_column (str): Column to write results to.
         system_prompt (str, optional): System prompt to prepend.
         user_prompt (str, optional): User prompt template.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     from src.notification import log_cortex_usage
     from datetime import datetime
-    
+
     start_time = datetime.now()
-    
+
     # Check if the output table and column exist, and create/add the column if necessary
     columns = [
         f"{input_column} VARCHAR(16777216)",
-        f"{output_column} VARCHAR(16777216)"
+        f"{output_column} VARCHAR(16777216)",
     ]
     # Ensure output table exists
     check_and_create_table(session, db, schema, output_table, columns)
@@ -403,7 +686,9 @@ def get_complete_result_from_column(session, model, db, schema, table, input_col
     user_prompt_escaped = escape_sql_string(user_prompt) if user_prompt else ""
 
     # Prepare user prompt by escaping special characters
-    user_prompt_sql = f"'{user_prompt_escaped} <{table}>' || {input_column} || '</{table}>'"
+    user_prompt_sql = (
+        f"'{user_prompt_escaped} <{table}>' || {input_column} || '</{table}>'"
+    )
 
     # Construct the SQL query without using PARSE_JSON incorrectly
     query = f"""
@@ -431,16 +716,16 @@ def get_complete_result_from_column(session, model, db, schema, table, input_col
         # Execute the batch operation
         session.sql(query).collect()
         end_time = datetime.now()
-        
+
         # Count how many rows were processed
         row_count_query = f"SELECT COUNT(*) as count FROM {source_table_full}"
-        row_count = session.sql(row_count_query).collect()[0]['COUNT']
-        
+        row_count = session.sql(row_count_query).collect()[0]["COUNT"]
+
         # Estimate tokens (rough approximation for batch operation)
         estimated_total_tokens = row_count * 100  # Rough estimate per row
         estimated_credits = estimated_total_tokens * 0.0001
-        
-        # Log the batch operation usage  
+
+        # Log the batch operation usage
         log_cortex_usage(
             session=session,
             function_name="COMPLETE",
@@ -449,9 +734,9 @@ def get_complete_result_from_column(session, model, db, schema, table, input_col
             estimated_credits=estimated_credits,
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch operation: {row_count} rows processed from {table}.{input_column} to {output_table}.{output_column}"
+            details=f"Batch operation: {row_count} rows processed from {table}.{input_column} to {output_table}.{output_column}",
         )
-        
+
     except SnowparkSQLException as e:
         end_time = datetime.now()
         # Log the failed attempt
@@ -461,14 +746,24 @@ def get_complete_result_from_column(session, model, db, schema, table, input_col
             model_name=model,
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch operation failed: {str(e)}"
+            details=f"Batch operation failed: {str(e)}",
         )
         raise e
 
 
-def get_translation_from_column(session, db, schema, table, input_column, source_lang, target_lang, output_table, output_column):
+def get_translation_from_column(
+    session,
+    db,
+    schema,
+    table,
+    input_column,
+    source_lang,
+    target_lang,
+    output_table,
+    output_column,
+):
     """Fetches content from a column and writes the translation result to an output table.
-    
+
     Args:
         session: Snowflake session.
         db (str): Database name.
@@ -479,18 +774,18 @@ def get_translation_from_column(session, db, schema, table, input_column, source
         target_lang (str): Target language code.
         output_table (str): Table to write results to.
         output_column (str): Column to write results to.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     from src.notification import log_cortex_usage
     from datetime import datetime
-    
+
     start_time = datetime.now()
-    
+
     columns = [
         f"{input_column} VARCHAR(16777216)",
-        f"{output_column} VARCHAR(16777216)"
+        f"{output_column} VARCHAR(16777216)",
     ]
     # Ensure output table exists
     check_and_create_table(session, db, schema, output_table, columns)
@@ -506,14 +801,14 @@ def get_translation_from_column(session, db, schema, table, input_column, source
     try:
         session.sql(query).collect()
         end_time = datetime.now()
-        
+
         # Count processed rows and log usage
         row_count_query = f"SELECT COUNT(*) as count FROM {source_table_full}"
-        row_count = session.sql(row_count_query).collect()[0]['COUNT']
-        
+        row_count = session.sql(row_count_query).collect()[0]["COUNT"]
+
         estimated_total_tokens = row_count * 50  # Rough estimate for translation
         estimated_credits = estimated_total_tokens * 0.0001
-        
+
         log_cortex_usage(
             session=session,
             function_name="TRANSLATE",
@@ -521,9 +816,9 @@ def get_translation_from_column(session, db, schema, table, input_column, source
             estimated_credits=estimated_credits,
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch translation: {row_count} rows from {source_lang} to {target_lang}"
+            details=f"Batch translation: {row_count} rows from {source_lang} to {target_lang}",
         )
-        
+
     except SnowparkSQLException as e:
         end_time = datetime.now()
         log_cortex_usage(
@@ -531,14 +826,16 @@ def get_translation_from_column(session, db, schema, table, input_column, source
             function_name="TRANSLATE",
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch translation failed: {str(e)}"
+            details=f"Batch translation failed: {str(e)}",
         )
         raise e
 
 
-def get_summary_from_column(session, db, schema, table, input_column, output_table, output_column):
+def get_summary_from_column(
+    session, db, schema, table, input_column, output_table, output_column
+):
     """Fetches content from a column and writes the summary result to an output table.
-    
+
     Args:
         session: Snowflake session.
         db (str): Database name.
@@ -547,18 +844,18 @@ def get_summary_from_column(session, db, schema, table, input_column, output_tab
         input_column (str): Column containing text to summarize.
         output_table (str): Table to write results to.
         output_column (str): Column to write results to.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     from src.notification import log_cortex_usage
     from datetime import datetime
-    
+
     start_time = datetime.now()
-    
+
     columns = [
         f"{input_column} VARCHAR(16777216)",
-        f"{output_column} VARCHAR(16777216)"
+        f"{output_column} VARCHAR(16777216)",
     ]
     # Ensure output table exists
     check_and_create_table(session, db, schema, output_table, columns)
@@ -574,14 +871,14 @@ def get_summary_from_column(session, db, schema, table, input_column, output_tab
     try:
         session.sql(query).collect()
         end_time = datetime.now()
-        
+
         # Count processed rows and log usage
         row_count_query = f"SELECT COUNT(*) as count FROM {source_table_full}"
-        row_count = session.sql(row_count_query).collect()[0]['COUNT']
-        
+        row_count = session.sql(row_count_query).collect()[0]["COUNT"]
+
         estimated_total_tokens = row_count * 75  # Rough estimate for summarization
         estimated_credits = estimated_total_tokens * 0.0001
-        
+
         log_cortex_usage(
             session=session,
             function_name="SUMMARIZE",
@@ -589,9 +886,9 @@ def get_summary_from_column(session, db, schema, table, input_column, output_tab
             estimated_credits=estimated_credits,
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch summarization: {row_count} rows processed"
+            details=f"Batch summarization: {row_count} rows processed",
         )
-        
+
     except SnowparkSQLException as e:
         end_time = datetime.now()
         log_cortex_usage(
@@ -599,13 +896,16 @@ def get_summary_from_column(session, db, schema, table, input_column, output_tab
             function_name="SUMMARIZE",
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch summarization failed: {str(e)}"
+            details=f"Batch summarization failed: {str(e)}",
         )
         raise e
 
-def get_extraction_from_column(session, db, schema, table, input_column, query_text, output_table, output_column):
+
+def get_extraction_from_column(
+    session, db, schema, table, input_column, query_text, output_table, output_column
+):
     """Fetches content from a column and writes the extracted answer to an output table.
-    
+
     Args:
         session: Snowflake session.
         db (str): Database name.
@@ -615,18 +915,18 @@ def get_extraction_from_column(session, db, schema, table, input_column, query_t
         query_text (str): Query text to guide extraction.
         output_table (str): Table to write results to.
         output_column (str): Column to write results to.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     from src.notification import log_cortex_usage
     from datetime import datetime
-    
+
     start_time = datetime.now()
-    
+
     columns = [
         f"{input_column} VARCHAR(16777216)",
-        f"{output_column} VARCHAR(16777216)"
+        f"{output_column} VARCHAR(16777216)",
     ]
     # Ensure output table exists
     check_and_create_table(session, db, schema, output_table, columns)
@@ -644,14 +944,14 @@ def get_extraction_from_column(session, db, schema, table, input_column, query_t
     try:
         session.sql(query).collect()
         end_time = datetime.now()
-        
+
         # Count processed rows and log usage
         row_count_query = f"SELECT COUNT(*) as count FROM {source_table_full}"
-        row_count = session.sql(row_count_query).collect()[0]['COUNT']
-        
+        row_count = session.sql(row_count_query).collect()[0]["COUNT"]
+
         estimated_total_tokens = row_count * 60  # Rough estimate for extraction
         estimated_credits = estimated_total_tokens * 0.0001
-        
+
         log_cortex_usage(
             session=session,
             function_name="EXTRACT_ANSWER",
@@ -659,9 +959,9 @@ def get_extraction_from_column(session, db, schema, table, input_column, query_t
             estimated_credits=estimated_credits,
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch extraction: {row_count} rows processed with query '{query_text}'"
+            details=f"Batch extraction: {row_count} rows processed with query '{query_text}'",
         )
-        
+
     except SnowparkSQLException as e:
         end_time = datetime.now()
         log_cortex_usage(
@@ -669,14 +969,16 @@ def get_extraction_from_column(session, db, schema, table, input_column, query_t
             function_name="EXTRACT_ANSWER",
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch extraction failed: {str(e)}"
+            details=f"Batch extraction failed: {str(e)}",
         )
         raise e
 
 
-def get_sentiment_from_column(session, db, schema, table, input_column, output_table, output_column):
+def get_sentiment_from_column(
+    session, db, schema, table, input_column, output_table, output_column
+):
     """Fetches content from a column and writes the sentiment analysis result to an output table.
-    
+
     Args:
         session: Snowflake session.
         db (str): Database name.
@@ -685,18 +987,18 @@ def get_sentiment_from_column(session, db, schema, table, input_column, output_t
         input_column (str): Column containing text to analyze.
         output_table (str): Table to write results to.
         output_column (str): Column to write results to.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     from src.notification import log_cortex_usage
     from datetime import datetime
-    
+
     start_time = datetime.now()
-    
+
     columns = [
         f"{input_column} VARCHAR(16777216)",
-        f"{output_column} VARCHAR(16777216)"
+        f"{output_column} VARCHAR(16777216)",
     ]
     # Ensure output table exists
     check_and_create_table(session, db, schema, output_table, columns)
@@ -712,14 +1014,14 @@ def get_sentiment_from_column(session, db, schema, table, input_column, output_t
     try:
         session.sql(query).collect()
         end_time = datetime.now()
-        
+
         # Count processed rows and log usage
         row_count_query = f"SELECT COUNT(*) as count FROM {source_table_full}"
-        row_count = session.sql(row_count_query).collect()[0]['COUNT']
-        
+        row_count = session.sql(row_count_query).collect()[0]["COUNT"]
+
         estimated_total_tokens = row_count * 30  # Rough estimate for sentiment analysis
         estimated_credits = estimated_total_tokens * 0.0001
-        
+
         log_cortex_usage(
             session=session,
             function_name="SENTIMENT",
@@ -727,9 +1029,9 @@ def get_sentiment_from_column(session, db, schema, table, input_column, output_t
             estimated_credits=estimated_credits,
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch sentiment analysis: {row_count} rows processed"
+            details=f"Batch sentiment analysis: {row_count} rows processed",
         )
-        
+
     except SnowparkSQLException as e:
         end_time = datetime.now()
         log_cortex_usage(
@@ -737,14 +1039,16 @@ def get_sentiment_from_column(session, db, schema, table, input_column, output_t
             function_name="SENTIMENT",
             start_time=start_time,
             end_time=end_time,
-            details=f"Batch sentiment analysis failed: {str(e)}"
+            details=f"Batch sentiment analysis failed: {str(e)}",
         )
         raise e
 
-    
-def create_vector_embedding_from_stage(session, db, schema, stage, embedding_type, embedding_model,output_table):
+
+def create_vector_embedding_from_stage(
+    session, db, schema, stage, embedding_type, embedding_model, output_table
+):
     """Creates vector embeddings for all files in a selected stage.
-    
+
     Args:
         session: Snowflake session.
         db (str): Database name.
@@ -753,22 +1057,25 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
         embedding_type (str): Type of embedding to create.
         embedding_model (str): Model to use for embeddings.
         output_table (str): Table to write embeddings to.
-        
+
     Raises:
         SnowparkSQLException: If the query fails.
     """
     from src.notification import log_cortex_usage
     from datetime import datetime
-    
+
     start_time = datetime.now()
-    
+
     stage_path = f"@{db}.{schema}.{stage}"
     output_table_full = f"{db}.{schema}.{output_table}"
 
     # Define the columns required in the output table
     columns = [
-        "relative_path VARCHAR(16777216)","size NUMBER(38,0)","file_url VARCHAR(16777216)",
-        "scoped_file_url VARCHAR(16777216)", "chunk VARCHAR(16777216)"
+        "relative_path VARCHAR(16777216)",
+        "size NUMBER(38,0)",
+        "file_url VARCHAR(16777216)",
+        "scoped_file_url VARCHAR(16777216)",
+        "chunk VARCHAR(16777216)",
     ]
     if embedding_model == "EMBED_TEXT_768":
         columns.append("vector_embeddings VECTOR(FLOAT, 768)")
@@ -797,17 +1104,19 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
         print(query)
         session.sql(query).collect()
         end_time = datetime.now()
-        
+
         # Count how many chunks were processed
         print(f"📊 Checking final record count in {output_table_full}...")
         chunk_count_query = f"SELECT COUNT(*) as count FROM {output_table_full}"
-        chunk_count = session.sql(chunk_count_query).collect()[0]['COUNT']
+        chunk_count = session.sql(chunk_count_query).collect()[0]["COUNT"]
         print(f"📊 Total records in output table: {chunk_count}")
-        
+
         # Estimate tokens for embedding operation
-        estimated_total_tokens = chunk_count * 200  # Rough estimate per chunk for embeddings
+        estimated_total_tokens = (
+            chunk_count * 200
+        )  # Rough estimate per chunk for embeddings
         estimated_credits = estimated_total_tokens * 0.0001
-        
+
         log_cortex_usage(
             session=session,
             function_name=embedding_type,
@@ -816,14 +1125,18 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
             estimated_credits=estimated_credits,
             start_time=start_time,
             end_time=end_time,
-            details=f"Vector embedding creation: {chunk_count} chunks processed from stage {stage}"
+            details=f"Vector embedding creation: {chunk_count} chunks processed from stage {stage}",
         )
-        
+
         try:
-            st.success(f"Vector embeddings created successfully for all files in {stage}. Results saved to {output_table}.")
+            st.success(
+                f"Vector embeddings created successfully for all files in {stage}. Results saved to {output_table}."
+            )
         except:
-            print(f"✓ Vector embeddings created successfully for all files in {stage}. Results saved to {output_table}.")
-        
+            print(
+                f"✓ Vector embeddings created successfully for all files in {stage}. Results saved to {output_table}."
+            )
+
     except SnowparkSQLException as e:
         end_time = datetime.now()
         log_cortex_usage(
@@ -832,7 +1145,7 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
             model_name=embedding_model,
             start_time=start_time,
             end_time=end_time,
-            details=f"Vector embedding creation failed: {str(e)}"
+            details=f"Vector embedding creation failed: {str(e)}",
         )
         try:
             st.error(f"Failed to create embeddings: {e}")
@@ -840,7 +1153,18 @@ def create_vector_embedding_from_stage(session, db, schema, stage, embedding_typ
             print(f"✗ Failed to create embeddings: {e}")
         raise e
 
-def create_cortex_search_service(session, database, schema, table, column, attributes, service_name, embedding_model, warehouse):
+
+def create_cortex_search_service(
+    session,
+    database,
+    schema,
+    table,
+    column,
+    attributes,
+    service_name,
+    embedding_model,
+    warehouse,
+):
     """Creates a Cortex Search Service for the specified table and column.
 
     Args:
@@ -859,8 +1183,8 @@ def create_cortex_search_service(session, database, schema, table, column, attri
 
     attributes = " , ".join(attributes)
 
-    print("column: ",column)
-    print("attributes: ",attributes)
+    print("column: ", column)
+    print("attributes: ", attributes)
 
     query = f"""
         CREATE OR REPLACE CORTEX SEARCH SERVICE {database}.{schema}.{service_name}
@@ -873,7 +1197,7 @@ def create_cortex_search_service(session, database, schema, table, column, attri
         );
     """
     try:
-        print("query: ",query)
+        print("query: ", query)
         session.sql(query).collect()
         st.success(f"Cortex Search Service {service_name} created successfully.")
     except Exception as e:

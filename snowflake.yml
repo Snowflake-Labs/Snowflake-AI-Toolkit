@@ -3,7 +3,7 @@ definition_version: '2'
 entities:
   streamlit:
     type: streamlit
-    identifier: snowflake_ai_toolkit_kavi_demo
+    identifier: snowflake_ai_toolkit_demo
     stage: sf_ai_stage
     query_warehouse: compute_wh
     main_file: streamlit_app.py

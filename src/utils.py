@@ -1539,35 +1539,35 @@ def setup_pdf_text_chunker(session):
     PACKAGES = ('snowflake-snowpark-python', 'PyPDF2', 'langchain')
     AS
     $$
-import PyPDF2
-import io
-import pandas as pd
-from snowflake.snowpark.files import SnowflakeFile
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-class pdf_text_chunker:
-    def read_pdf(self, file_url: str) -> str:
-        with SnowflakeFile.open(file_url, 'rb') as f:
-            buffer = io.BytesIO(f.readall())
-        reader = PyPDF2.PdfReader(buffer)
-        text = ""
-        for page in reader.pages:
-            try:
-                text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
-            except:
-                text = "Unable to Extract"
-        return text
-
-    def process(self, file_url: str):
-        text = self.read_pdf(file_url)
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=4000,
-            chunk_overlap=400,
-            length_function=len
-        )
-        chunks = text_splitter.split_text(text)
-        df = pd.DataFrame(chunks, columns=['chunk'])
-        yield from df.itertuples(index=False, name=None)
+    import PyPDF2
+    import io
+    import pandas as pd
+    from snowflake.snowpark.files import SnowflakeFile
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    
+    class pdf_text_chunker:
+        def read_pdf(self, file_url: str) -> str:
+            with SnowflakeFile.open(file_url, 'rb') as f:
+                buffer = io.BytesIO(f.readall())
+            reader = PyPDF2.PdfReader(buffer)
+            text = ""
+            for page in reader.pages:
+                try:
+                    text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
+                except:
+                    text = "Unable to Extract"
+            return text
+    
+        def process(self, file_url: str):
+            text = self.read_pdf(file_url)
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=4000,
+                chunk_overlap=400,
+                length_function=len
+            )
+            chunks = text_splitter.split_text(text)
+            df = pd.DataFrame(chunks, columns=['chunk'])
+            yield from df.itertuples(index=False, name=None)
     $$
     """
     try:
@@ -2685,8 +2685,8 @@ def create_starter_sql(session):
                         print("✓ Inserted sample conversation data")
                     elif "sales_metrics" in statement:
                         print("✓ Inserted sample metrics data")
-                elif "CREATE OR REPLACE WAREHOUSE" in statement.upper():
-                    print("✓ Created sales_intelligence_wh warehouse")
+                #elif "CREATE OR REPLACE WAREHOUSE" in statement.upper():
+                #    print("✓ Created sales_intelligence_wh warehouse")
                 elif "CREATE OR REPLACE CORTEX SEARCH SERVICE" in statement.upper():
                     print("✓ Created sales_conversation_search_Demo service")
                 elif (

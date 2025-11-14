@@ -29,7 +29,7 @@ def display_search(session):
     #     st.write(res)
 
 
-    warehouse = config["warehouse"]
+    warehouse = config["snowflake_connection"]["warehouse"]
 
     if create_or_use == "Create":
 

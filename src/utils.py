@@ -1508,7 +1508,7 @@ def show_toast_message(message, duration=3, toast_type="info", position="top-rig
     toast_container.empty()
 
 
-def setup_pdf_text_chunker(session):
+def setup_pdf_text_chunker(session, db, schema):
     """
     Sets up the pdf_text_chunker UDF in the current database and schema.
 
@@ -1520,7 +1520,7 @@ def setup_pdf_text_chunker(session):
     """
     # Check if UDF already exists
     try:
-        udf_check_query = "SHOW USER FUNCTIONS LIKE 'pdf_text_chunker'"
+        udf_check_query = f"SHOW USER FUNCTIONS LIKE 'pdf_text_chunker' IN {db}.{schema}"
         existing_udfs = session.sql(udf_check_query).collect()
         if existing_udfs:
             # st.info("UDF pdf_text_chunker already exists. Skipping creation.")
@@ -1530,8 +1530,8 @@ def setup_pdf_text_chunker(session):
         return
 
     # Create UDF if it doesn't exist
-    create_udf_query = """
-    CREATE OR REPLACE FUNCTION pdf_text_chunker(file_url STRING)
+    create_udf_query = f"""
+    CREATE OR REPLACE FUNCTION {db}.{schema}.pdf_text_chunker(file_url STRING)
     RETURNS TABLE (chunk VARCHAR)
     LANGUAGE PYTHON
     RUNTIME_VERSION = '3.9'

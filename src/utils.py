@@ -968,7 +968,7 @@ def run_setup_silently(session: Session, config: dict):
         create_stages_tables_for_demo(session)
         snowflake_config = get_snowflake_config()
         setup_pdf_text_chunker(
-            session, snowflake_config.get("database"), snowflake_config.get("demo_schema")
+            session, snowflake_config.get("database"), snowflake_config.get("schema")
         )
         create_search_and_rag_for_demo(session)
         create_starter_sql(session)
@@ -1539,35 +1539,35 @@ def setup_pdf_text_chunker(session, db, schema):
     PACKAGES = ('snowflake-snowpark-python', 'PyPDF2', 'langchain')
     AS
     $$
-    import PyPDF2
-    import io
-    import pandas as pd
-    from snowflake.snowpark.files import SnowflakeFile
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    
-    class pdf_text_chunker:
-        def read_pdf(self, file_url: str) -> str:
-            with SnowflakeFile.open(file_url, 'rb') as f:
-                buffer = io.BytesIO(f.readall())
-            reader = PyPDF2.PdfReader(buffer)
-            text = ""
-            for page in reader.pages:
-                try:
-                    text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
-                except:
-                    text = "Unable to Extract"
-            return text
-    
-        def process(self, file_url: str):
-            text = self.read_pdf(file_url)
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=4000,
-                chunk_overlap=400,
-                length_function=len
-            )
-            chunks = text_splitter.split_text(text)
-            df = pd.DataFrame(chunks, columns=['chunk'])
-            yield from df.itertuples(index=False, name=None)
+import PyPDF2
+import io
+import pandas as pd
+from snowflake.snowpark.files import SnowflakeFile
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+class pdf_text_chunker:
+    def read_pdf(self, file_url: str) -> str:
+        with SnowflakeFile.open(file_url, 'rb') as f:
+            buffer = io.BytesIO(f.readall())
+        reader = PyPDF2.PdfReader(buffer)
+        text = ""
+        for page in reader.pages:
+            try:
+                text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
+            except:
+                text = "Unable to Extract"
+        return text
+
+    def process(self, file_url: str):
+        text = self.read_pdf(file_url)
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=4000,
+            chunk_overlap=400,
+            length_function=len
+        )
+        chunks = text_splitter.split_text(text)
+        df = pd.DataFrame(chunks, columns=['chunk'])
+        yield from df.itertuples(index=False, name=None)
     $$
     """
     try:

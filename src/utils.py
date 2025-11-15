@@ -967,8 +967,8 @@ def run_setup_silently(session: Session, config: dict):
         create_demo_database_and_stage_if_not_exists(session)
         create_stages_tables_for_demo(session)
         snowflake_config = get_snowflake_config()
-        setup_pdf_text_chunker_demo(
-            session, snowflake_config.get("database"), snowflake_config.get("schema")
+        setup_pdf_text_chunker(
+            session, snowflake_config.get("database"), snowflake_config.get("demo_schema")
         )
         create_search_and_rag_for_demo(session)
         create_starter_sql(session)
@@ -1539,35 +1539,35 @@ def setup_pdf_text_chunker(session):
     PACKAGES = ('snowflake-snowpark-python', 'PyPDF2', 'langchain')
     AS
     $$
-import PyPDF2
-import io
-import pandas as pd
-from snowflake.snowpark.files import SnowflakeFile
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-class pdf_text_chunker:
-    def read_pdf(self, file_url: str) -> str:
-        with SnowflakeFile.open(file_url, 'rb') as f:
-            buffer = io.BytesIO(f.readall())
-        reader = PyPDF2.PdfReader(buffer)
-        text = ""
-        for page in reader.pages:
-            try:
-                text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
-            except:
-                text = "Unable to Extract"
-        return text
-
-    def process(self, file_url: str):
-        text = self.read_pdf(file_url)
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=4000,
-            chunk_overlap=400,
-            length_function=len
-        )
-        chunks = text_splitter.split_text(text)
-        df = pd.DataFrame(chunks, columns=['chunk'])
-        yield from df.itertuples(index=False, name=None)
+    import PyPDF2
+    import io
+    import pandas as pd
+    from snowflake.snowpark.files import SnowflakeFile
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    
+    class pdf_text_chunker:
+        def read_pdf(self, file_url: str) -> str:
+            with SnowflakeFile.open(file_url, 'rb') as f:
+                buffer = io.BytesIO(f.readall())
+            reader = PyPDF2.PdfReader(buffer)
+            text = ""
+            for page in reader.pages:
+                try:
+                    text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
+                except:
+                    text = "Unable to Extract"
+            return text
+    
+        def process(self, file_url: str):
+            text = self.read_pdf(file_url)
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=4000,
+                chunk_overlap=400,
+                length_function=len
+            )
+            chunks = text_splitter.split_text(text)
+            df = pd.DataFrame(chunks, columns=['chunk'])
+            yield from df.itertuples(index=False, name=None)
     $$
     """
     try:
@@ -1576,65 +1576,65 @@ class pdf_text_chunker:
     except Exception as e:
         st.error(f"Error creating UDF: {e}")
 
+#DEPRECATED
+#def setup_pdf_text_chunker_demo(session, db, schema):
+#    """
+#    Sets up the pdf_text_chunker UDF in the current database and schema.
+#
+#    Args:
+#        session: Snowflake session object
+#
+#    Note:
+#        Creates a Python UDF that can process PDF files and split them into text chunks
+#    """
+#
+#     Create UDF if it doesn't exist
+#     TODO: Have to make schema dynamic
+#    create_udf_query = """
+#    CREATE OR REPLACE FUNCTION snowflake_ai_toolkit.public.pdf_text_chunker(file_url STRING)
+#    RETURNS TABLE (chunk VARCHAR)
+#    LANGUAGE PYTHON
+#    RUNTIME_VERSION = '3.9'
+#    HANDLER = 'pdf_text_chunker'
+#    PACKAGES = ('snowflake-snowpark-python', 'PyPDF2', 'langchain')
+#    AS
+#    $$
+#    import PyPDF2
+#    import io
+#    import pandas as pd
+#    from snowflake.snowpark.files import SnowflakeFile
+#    from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-def setup_pdf_text_chunker_demo(session, db, schema):
-    """
-    Sets up the pdf_text_chunker UDF in the current database and schema.
-
-    Args:
-        session: Snowflake session object
-
-    Note:
-        Creates a Python UDF that can process PDF files and split them into text chunks
-    """
-
-    # Create UDF if it doesn't exist
-    # TODO: Have to make schema dynamic
-    create_udf_query = """
-    CREATE OR REPLACE FUNCTION snowflake_ai_toolkit.public.pdf_text_chunker(file_url STRING)
-    RETURNS TABLE (chunk VARCHAR)
-    LANGUAGE PYTHON
-    RUNTIME_VERSION = '3.9'
-    HANDLER = 'pdf_text_chunker'
-    PACKAGES = ('snowflake-snowpark-python', 'PyPDF2', 'langchain')
-    AS
-    $$
-import PyPDF2
-import io
-import pandas as pd
-from snowflake.snowpark.files import SnowflakeFile
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-class pdf_text_chunker:
-    def read_pdf(self, file_url: str) -> str:
-        with SnowflakeFile.open(file_url, 'rb') as f:
-            buffer = io.BytesIO(f.readall())
-        reader = PyPDF2.PdfReader(buffer)
-        text = ""
-        for page in reader.pages:
-            try:
-                text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
-            except:
-                text = "Unable to Extract"
-        return text
-
-    def process(self, file_url: str):
-        text = self.read_pdf(file_url)
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=4000,
-            chunk_overlap=400,
-            length_function=len
-        )
-        chunks = text_splitter.split_text(text)
-        df = pd.DataFrame(chunks, columns=['chunk'])
-        yield from df.itertuples(index=False, name=None)
-    $$
-    """
-    try:
-        session.sql(create_udf_query).collect()
-        # st.success("UDF pdf_text_chunker created successfully.")
-    except Exception as e:
-        print("UDF Already exists!")
+#    class pdf_text_chunker:
+#        def read_pdf(self, file_url: str) -> str:
+#            with SnowflakeFile.open(file_url, 'rb') as f:
+#                buffer = io.BytesIO(f.readall())
+#            reader = PyPDF2.PdfReader(buffer)
+#            text = ""
+#            for page in reader.pages:
+#                try:
+#                    text += page.extract_text().replace('\\n', ' ').replace('\\0', ' ')
+#                except:
+#                    text = "Unable to Extract"
+#            return text
+#
+#        def process(self, file_url: str):
+#            text = self.read_pdf(file_url)
+#            text_splitter = RecursiveCharacterTextSplitter(
+#                chunk_size=4000,
+#                chunk_overlap=400,
+#                length_function=len
+#            )
+#            chunks = text_splitter.split_text(text)
+#            df = pd.DataFrame(chunks, columns=['chunk'])
+#            yield from df.itertuples(index=False, name=None)
+#    $$
+#    """
+#    try:
+#        session.sql(create_udf_query).collect()
+#        # st.success("UDF pdf_text_chunker created successfully.")
+#    except Exception as e:
+#        print("UDF Already exists!")
 
 
 def make_llm_call(session, system_prompt, prompt, model):
@@ -2685,8 +2685,8 @@ def create_starter_sql(session):
                         print("✓ Inserted sample conversation data")
                     elif "sales_metrics" in statement:
                         print("✓ Inserted sample metrics data")
-                elif "CREATE OR REPLACE WAREHOUSE" in statement.upper():
-                    print("✓ Created sales_intelligence_wh warehouse")
+                #elif "CREATE OR REPLACE WAREHOUSE" in statement.upper():
+                #    print("✓ Created sales_intelligence_wh warehouse")
                 elif "CREATE OR REPLACE CORTEX SEARCH SERVICE" in statement.upper():
                     print("✓ Created sales_conversation_search_Demo service")
                 elif (

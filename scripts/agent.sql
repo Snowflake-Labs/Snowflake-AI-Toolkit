@@ -1,20 +1,20 @@
 use role accountadmin;
 SET my_user = CURRENT_USER();
 
-CREATE OR REPLACE WAREHOUSE sales_intelligence_wh
-WITH 
-    WAREHOUSE_SIZE = 'SMALL'
-    AUTO_SUSPEND = 3600
-    AUTO_RESUME = TRUE
-    INITIALLY_SUSPENDED = FALSE
-    MIN_CLUSTER_COUNT = 1
-    MAX_CLUSTER_COUNT = 1
-    SCALING_POLICY = 'STANDARD'
-COMMENT = 'Sales intelligence warehouse with 1-hour auto-suspend policy'; -- warehouse creation
+--CREATE OR REPLACE WAREHOUSE sales_intelligence_wh
+--WITH 
+--    WAREHOUSE_SIZE = 'SMALL'
+--    AUTO_SUSPEND = 3600
+--    AUTO_RESUME = TRUE
+--    INITIALLY_SUSPENDED = FALSE
+--    MIN_CLUSTER_COUNT = 1
+--    MAX_CLUSTER_COUNT = 1
+--    SCALING_POLICY = 'STANDARD'
+--COMMENT = 'Sales intelligence warehouse with 1-hour auto-suspend policy'; -- warehouse creation
 
 
-USE DATABASE SNOWFLAKE_AI_TOOLKIT;
-USE SCHEMA DEMO;
+USE DATABASE COMMON_DB;
+USE SCHEMA SNOWFLAKE_AI_TOOLKIT;
 
 -- Create tables for sales data
 CREATE TABLE sales_conversations (

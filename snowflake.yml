@@ -39,7 +39,14 @@ entities:
       - src/display_chat.py
       - src/playground_settings.py
       - environment.yml
-      - data/
+      - data/fine-tune/
+      - data/images/
+      - data/rag/contracts/
+      - data/rag/repair_manuals/
+      - data/samples/emails.csv
+      - data/samples/solution_center_articles.csv
+      - data/samples/audio/
+      - data/search/                        
       - scripts/
 
   # audio_to_text:
